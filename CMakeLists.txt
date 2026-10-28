@@ -13,6 +13,7 @@ include(generated/rexglue.cmake)
 # Sources
 set(PGR4RECOMP_SOURCES
     src/main.cpp
+    src/xam_fixes.cpp
 )
 
 if(WIN32)
