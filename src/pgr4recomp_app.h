@@ -6,6 +6,8 @@
 
 #include <rex/rex_app.h>
 
+#include "scripted_input.h"
+
 class Pgr4recompApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -19,6 +21,7 @@ class Pgr4recompApp : public rex::ReXApp {
   // The SDK's gpu_plugin cvar defaults to "" (no GPU emulation); PGR4 needs the Xenos backend.
   void OnPreSetup(rex::RuntimeConfig& config) override {
     if (config.gpu_plugin.empty()) config.gpu_plugin = "xenos";
+    config.input_factory = pgr4::ScriptedInputDriver::CreateInputSystem;  // == SDK default unless PGR4_PAD set
   }
 
   // Override virtual hooks for customization:
