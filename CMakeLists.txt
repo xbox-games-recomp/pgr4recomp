@@ -13,6 +13,7 @@ include(generated/rexglue.cmake)
 # Sources
 set(PGR4RECOMP_SOURCES
     src/main.cpp
+    src/import_trace.cpp
     src/xam_fixes.cpp
 )
 
