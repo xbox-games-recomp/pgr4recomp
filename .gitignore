@@ -1,0 +1,6 @@
+assets
+work/
+out/
+build/
+generated/default/
+CMakeUserPresets.json

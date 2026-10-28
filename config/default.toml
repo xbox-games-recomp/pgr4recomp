@@ -1,0 +1,19 @@
+# default.xex codegen overrides (included from pgr4recomp_manifest.toml [entrypoint]).
+# Addresses verified by hand against work/default.pe; see NOTES.md section 5.
+
+[functions]
+# Leaf functions with no .pdata entry, reached only by tail branches.
+0x824B8670 = { size = 0x4 }             # blr
+0x82526280 = { end = 0x825262EC }
+0x828DDA98 = { end = 0x828DDAAC }
+0x829C23A0 = { end = 0x829C23B8 }       # BINK section
+0x828E5488 = { size = 0x4 }             # b 0x828E50F8 thunk
+
+# C++ EH layout: the parent's epilogue sits after its catch funclets, and the last funclet's
+# .pdata range (0x80) swallows it. Trim the funclet and give the epilogue back to the parent.
+0x82704DD0 = { end = 0x82704E30 }
+0x82704E30 = { parent = 0x827049D0, end = 0x82704E50 }
+0x82746C24 = { end = 0x82746C84 }
+0x82746C84 = { parent = 0x82746820, end = 0x82746CA4 }
+0x827561B4 = { end = 0x82756214 }
+0x82756214 = { parent = 0x82755DB0, end = 0x82756234 }
