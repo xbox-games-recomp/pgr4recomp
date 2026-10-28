@@ -4,3 +4,4 @@ out/
 build/
 generated/default/
 CMakeUserPresets.json
+__pycache__/
