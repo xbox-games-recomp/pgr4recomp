@@ -82,6 +82,35 @@ game's Lua 5.1 uses setjmp or C++ throw before relying on Lua error paths.
 - Benign log noise: `GAME:\Game\Replay` access denied (write to read-only game dir; may matter for replays),
   missing `loc\*\lang.ini`, `debug_frontend.xml`, `d:\DebugOptions.ini`, `Vince\TestCreate.tmp` (dev probes).
 
+## 7. Scripted pad + first race (2026-10-28)
+
+- `src/scripted_input.h`: synthetic pad driver added to the SDK's default input system when `PGR4_PAD` is set
+  (synthetic devices route to guest user 0 and merge with a real pad). Syntax in the header, e.g.
+  `$env:PGR4_PAD='~4@15:START,~4@17:A'; & scripts\run.ps1 menu1`. Presses are logged (`PGR4_PAD: t=..`).
+- Run menu1 (START/A mashing): Dolby logo -> loading -> **first-run race** (Street Race, St Petersburg, Ford
+  Sierra Cosworth RS500) with countdown, world, HUD and pause menu all rendering. A new profile starts in this
+  race, not the front-end, so the menus come after it. No fatal errors in 2 min.
+- Log noise, all optional/dev files: VehiclePvsData/*.dat, damagescripts/*.dms, dontship/textures, ai/*.ain,
+  areas/frontend_mad.bpr, `SAVE:\buffer.save` (first run), `\Device\Image`, `IoDismountVolumeByFileHandle` stub,
+  `XMPPlayTitlePlaylist: System playback is enabled!` (x17).
+
+## 8. Live pad, autopilot, main menu reached (2026-10-28)
+
+- Pad additions (`src/scripted_input.h`): `PGR4_PAD_FILE` live command file (re-read on mtime change, times
+  relative to the change), analog channels `RT=0.6`, `LX=-0.4` etc., expired one-shot entries pruned.
+- `scripts/goto_race.ps1 <tag>`: boot + START/A through the input-only black screens until the race car loads.
+  Boot path for a fresh profile: intro -> **black screens that still take input** (START, A, A; likely title /
+  profile / storage prompts that don't render -- open rendering bug) -> event card "Catch Me If You Can"
+  (choose difficulty) -> St Petersburg street race (4 laps, Ford Sierra Cosworth).
+- `scripts/autopilot.py`: drives by the HUD minimap. Traces the route line from the arrow tip (BFS, 2 px gap
+  bridging; opponent dots sit on the line), steers at the point ~30 px along it, reads MPH digits with templates
+  (`scripts/speed_digits.json` from `build_speed_templates.py`; no samples of 7/9 yet), speed target 75->25 mph by
+  bend angle, three-point turn when <= 3 mph. `--debug` dumps the minimap mask. Reaches 60+ mph and gets round
+  most of the lap; still gets pinned on the tight hairpins, so the race ended in TIMEOUT / DNF.
+- After the race: Results (DNF) -> End of Race (Retry / Watch Replay / Go Back to Main Menu) -> **Main Menu**
+  (Single Player / Multiplayer / PGR Shop). Everything on the way rendered correctly except the boot black screens.
+- Gotcha: the autopilot's stop condition (speed HUD gone 5 s) misses the TIMEOUT screen, which keeps the speedo.
+
 ## Toolchain on this machine
 
 clang 23.1.3 (`C:\Program Files\LLVM\bin`), CMake (`C:\Program Files\CMake\bin`, not on PATH), Python 3.10.
