@@ -1,0 +1,106 @@
+diff --git a/include/rex/graphics/pipeline/shader/dxbc_translator.h b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+index 3b0fd61..1385573 100644
+--- a/include/rex/graphics/pipeline/shader/dxbc_translator.h
++++ b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+@@ -1039,6 +1039,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
+   uint32_t system_temp_position_;
+   // Special exports in vertex shaders.
+   uint32_t system_temp_point_size_edge_flag_kill_vertex_;
++  // Vertex shaders, x360_half_vertex_kill: .x nonzero if a 16-bit float vertex fetch read an
++  // exponent-31 value (Inf/NaN on the host).
++  uint32_t system_temp_half_special_fetched_;
+   // ROV only - 4 persistent VGPRs when writing to color targets, 2 VGPRs when
+   // not:
+   // X - Bit masks:
+diff --git a/src/graphics/pipeline/shader/dxbc_translator.cpp b/src/graphics/pipeline/shader/dxbc_translator.cpp
+index 2c31a0e..0a09d02 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator.cpp
+@@ -26,6 +26,13 @@
+ 
+ REXCVAR_DEFINE_BOOL(dxbc_switch, true, "GPU/Shader", "Use switch statements in DXBC");
+ 
++REXCVAR_DEFINE_BOOL(x360_half_vertex_kill, false, "GPU/Shader",
++                    "Drop vertices that fetch a 16-bit float with exponent 31 (Inf/NaN on the host) by "
++                    "moving them outside the clip volume. Games may write such values to hide "
++                    "geometry; host GPUs can rasterize partially non-finite triangles as huge "
++                    "wedges (Project Gotham Racing 4 crowd props).")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(dxbc_source_map, false, "GPU/Shader", "Generate source maps for DXBC");
+ 
+ namespace rex::graphics {
+@@ -821,6 +828,7 @@ void DxbcShaderTranslator::StartTranslation() {
+   if (is_vertex_shader()) {
+     system_temp_position_ = PushSystemTemp(0b1111);
+     system_temp_point_size_edge_flag_kill_vertex_ = PushSystemTemp(0b0100);
++    system_temp_half_special_fetched_ = PushSystemTemp(0b0001);
+     // Set the point size to a negative value to tell the geometry shader that
+     // it should use the default point size if the vertex shader does not
+     // override it.
+@@ -1008,6 +1016,16 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
+     }
+   }
+ 
++  // A vertex that fetched a 16-bit float with exponent 31: move it outside the clip volume (z < 0),
++  // so triangles made only of such vertices are dropped and those connecting it to normal vertices
++  // are clipped down to slivers. Flagged from the fetched bits, as a test of the final position
++  // for NaN can be optimized out by the host shader compiler.
++  if (REXCVAR_GET(x360_half_vertex_kill)) {
++    a_.OpMovC(dxbc::Dest::R(system_temp_position_),
++              dxbc::Src::R(system_temp_half_special_fetched_, dxbc::Src::kXXXX),
++              dxbc::Src::LF(0.0f, 0.0f, -1.0f, 1.0f), dxbc::Src::R(system_temp_position_));
++  }
++
+   // Write the position to the output.
+   a_.OpMov(dxbc::Dest::O(out_reg_vs_position_), dxbc::Src::R(system_temp_position_));
+ 
+@@ -1070,9 +1088,9 @@ void DxbcShaderTranslator::CompleteShaderCode() {
+   a_.OpRet();
+ 
+   if (is_vertex_shader()) {
+-    // Release system_temp_position_ and
+-    // system_temp_point_size_edge_flag_kill_vertex_.
+-    PopSystemTemp(2);
++    // Release system_temp_position_, system_temp_point_size_edge_flag_kill_vertex_ and
++    // system_temp_half_special_fetched_.
++    PopSystemTemp(3);
+   } else if (is_pixel_shader()) {
+     // Release system_temps_color_.
+     uint32_t shader_writes_color_targets = current_shader().writes_color_targets();
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+index 31de175..94e6f72 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+@@ -27,6 +27,8 @@
+ REXCVAR_DEFINE_BOOL(draw_resolution_scaled_texture_offsets, true, "GPU/Shader",
+                     "Scale texture offsets with draw resolution");
+ 
++REXCVAR_DECLARE(bool, x360_half_vertex_kill);
++
+ namespace rex::graphics {
+ using namespace ucode;
+ 
+@@ -389,6 +391,22 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
+         // games relying on that yet.
+         a_.OpUBFE(result_unpacked_dest, dxbc::Src::LU(16), dxbc::Src::LU(0, 16, 0, 16),
+                   dxbc::Src::R(system_temp_result_, 0b01010000));
++        if (REXCVAR_GET(x360_half_vertex_kill) && is_vertex_shader()) {
++          // Flag the vertex if any used component has exponent 31 (see CompleteVertexOrDomainShader).
++          uint32_t special_temp = PushSystemTemp();
++          a_.OpAnd(dxbc::Dest::R(special_temp, used_format_components), result_src,
++                   dxbc::Src::LU(0x7C00));
++          a_.OpIEq(dxbc::Dest::R(special_temp, used_format_components),
++                   dxbc::Src::R(special_temp), dxbc::Src::LU(0x7C00));
++          for (uint32_t i = 0; i < 4; ++i) {
++            if (used_format_components & (1 << i)) {
++              a_.OpOr(dxbc::Dest::R(system_temp_half_special_fetched_, 0b0001),
++                      dxbc::Src::R(system_temp_half_special_fetched_, dxbc::Src::kXXXX),
++                      dxbc::Src::R(special_temp).Select(i));
++            }
++          }
++          PopSystemTemp();
++        }
+         a_.OpF16ToF32(result_unpacked_dest, result_src);
+         break;
+       case xenos::VertexFormat::k_32:

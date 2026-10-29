@@ -37,6 +37,16 @@ class Pgr4recompApp : public rex::ReXApp {
     if (rex::cvar::GetFlagSource("clear_memory_page_state") == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName("clear_memory_page_state", "false");
     }
+    // The game hides crowd props by giving their bones float16 0x7FFF (NaN) translations; triangles
+    // joining them to visible bones become huge flickering sky wedges on the host (NOTES 12).
+    if (rex::cvar::GetFlagSource("x360_half_vertex_kill") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("x360_half_vertex_kill", "true");
+    }
+    // Crowd members come out with bones hundreds of units apart (empty grandstands, flickering sky
+    // wedges); skip those draws until the underlying CPU-side bug is found (NOTES 12).
+    if (rex::cvar::GetFlagSource("pgr4_crowd_cull") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("pgr4_crowd_cull", "true");
+    }
     config.input_factory = pgr4::ScriptedInputDriver::CreateInputSystem;  // == SDK default unless PGR4_PAD set
   }
 

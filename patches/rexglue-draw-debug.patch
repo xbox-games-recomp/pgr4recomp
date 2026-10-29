@@ -1,0 +1,785 @@
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..24cce8a 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,6 +10,17 @@
+  */
+ 
+ #include <algorithm>
++#include <cfloat>
++#include <array>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
+@@ -22,6 +33,7 @@
+ #include <rex/graphics/d3d12/command_processor.h>
+ #include <rex/graphics/d3d12/graphics_system.h>
+ #include <rex/graphics/d3d12/shader.h>
++#include <rex/graphics/pipeline/shader/interpreter.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -39,6 +51,16 @@ REXCVAR_DEFINE_BOOL(d3d12_readback_memexport, false, "GPU/D3D12",
+                     "Read data written by memory export in shaders on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(pgr4_crowd_cull, false, "GPU/D3D12",
++                    "Project Gotham Racing 4 workaround: skip draws of the skinned world shader whose "
++                    "bones are spread implausibly far apart (broken crowd members drawn as huge "
++                    "flickering sky wedges)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(pgr4_crowd_cull_spread, 50, "GPU/D3D12",
++                     "pgr4_crowd_cull: maximum bone distance from the skeleton median, world units")
++    .range(1, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(d3d12_readback_resolve, false, "GPU/D3D12",
+                     "Read render-to-texture results on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -2268,6 +2290,707 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_
+   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+ }
+ 
++// Draw debugging, controlled live by the file named in REX_DRAW_DEBUG_FILE (re-read when it changes):
++//   skip_vs = <hex hash>,...   skip draws whose vertex shader ucode hash is listed
++//   skip_ps = <hex hash>,...   same for the pixel shader (0 = no pixel shader)
++//   skip_vf = <hex address>,...  skip draws that fetch vertices from a listed guest address
++//   dump = <hex hash>,...      log the ucode disassembly of the listed shaders once
++//   log = N                    log the next N draws (shader hashes, primitive, count, buffers)
++//   watch = <hex addr>,<hex len>,<hex entry size>
++//                              every 32nd draw, log which entries of that guest physical range changed
++//                              since the last check (catches CPU writes racing the GPU's reads)
++//   trace_vf = <hex addr>      for draws fetching vertices from that address (PGR4 skinned world shader
++//                              layout), log c52-c55/c255 and the vf94 palette entries the vertices index
++//   force_upload = <hex addr>,<hex len>
++//                              invalidate that range before every draw, forcing a re-upload from guest memory
++// Each edit of the file restarts the log count.
++namespace {
++struct DrawDebugState {
++  std::mutex mutex;
++  std::string path;
++  std::filesystem::file_time_type mtime{};
++  std::unordered_set<uint64_t> skip_vs, skip_ps, skip_vf, dump;
++  uint32_t log_remaining = 0;
++  uint32_t watch_address = 0, watch_length = 0, watch_entry = 0;
++  uint32_t force_address = 0, force_length = 0;
++  uint32_t trace_vf = 0;
++  uint32_t skip_sentinel = 0;  // 1: first bone is the sentinel, 2: any referenced bone is
++  // late_writes: PGR4 crowd draws whose bone entries changed after the draw consumed them.
++  uint32_t late_writes = 0;  // window in draws, 0 = off
++  struct UsedRange {
++    uint64_t draw;
++    uint32_t address, length;
++    std::vector<uint8_t> data;
++  };
++  std::vector<UsedRange> used;
++  uint64_t late_events = 0, late_checked = 0, partial_logged = 0;
++  uint32_t detect = 0;
++  uint32_t skip_spread = 0;  // skip 72EE draws whose bones spread beyond this (units)  // bone deviation threshold, 0 = off
++  bool interp = false;
++  uint32_t interp_vf = 0;  // interp only this vf95 address, logging any odd triangle
++  // jumps: per object (mesh + instance world position), bone translations that jump between draws.
++  bool jumps = false;
++  std::unordered_map<uint64_t, std::vector<std::array<float, 4>>> bone_history;
++  uint64_t jump_events = 0;
++  uint64_t interp_events = 0, interp_draws = 0;
++  uint64_t detect_events = 0;
++  std::vector<uint8_t> watch_copy;
++  uint64_t draws = 0;
++  bool enabled = false;
++};
++
++DrawDebugState& GetDrawDebugState() {
++  static DrawDebugState state;
++  static std::once_flag once;
++  std::call_once(once, [] {
++    if (const char* p = std::getenv("REX_DRAW_DEBUG_FILE")) {
++      state.path = p;
++      state.enabled = true;
++    }
++  });
++  return state;
++}
++
++void ReloadDrawDebugFile(DrawDebugState& s) {
++  std::error_code ec;
++  auto mtime = std::filesystem::last_write_time(s.path, ec);
++  if (ec || mtime == s.mtime) return;
++  s.mtime = mtime;
++  s.skip_vs.clear();
++  s.skip_ps.clear();
++  s.skip_vf.clear();
++  s.dump.clear();
++  s.log_remaining = 0;
++  s.watch_length = 0;
++  s.watch_copy.clear();
++  s.force_length = 0;
++  s.trace_vf = 0;
++  s.skip_sentinel = 0;
++  s.detect = 0;
++  s.skip_spread = 0;
++  s.interp = false;
++  s.interp_vf = 0;
++  s.jumps = false;
++  s.bone_history.clear();
++  s.late_writes = 0;
++  s.late_events = 0;
++  s.late_checked = 0;
++  s.used.clear();
++  std::ifstream in(s.path);
++  std::string line;
++  while (std::getline(in, line)) {
++    auto eq = line.find('=');
++    if (eq == std::string::npos) continue;
++    auto trim = [](std::string v) {
++      v.erase(0, v.find_first_not_of(" \t\r"));
++      v.erase(v.find_last_not_of(" \t\r") + 1);
++      return v;
++    };
++    std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
++    if (key == "jumps") {
++      s.jumps = value == "1";
++    } else if (key == "interp_vf") {
++      s.interp_vf = uint32_t(std::strtoul(value.c_str(), nullptr, 16));
++      s.interp = s.interp_vf != 0;
++    } else if (key == "interp") {
++      s.interp = value == "1";
++    } else if (key == "skip_spread") {
++      s.skip_spread = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++    } else if (key == "detect") {
++      s.detect = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++      if (s.detect == 1) s.detect = 8000;
++    } else if (key == "late_writes") {
++      s.late_writes = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++    } else if (key == "skip_sentinel") {
++      s.skip_sentinel = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++    } else if (key == "trace_vf") {
++      s.trace_vf = uint32_t(std::strtoul(value.c_str(), nullptr, 16));
++    } else if (key == "force_upload") {
++      uint32_t a = 0, l = 0;
++      if (std::sscanf(value.c_str(), "%x,%x", &a, &l) == 2) {
++        s.force_address = a;
++        s.force_length = l;
++      }
++    } else if (key == "watch") {
++      uint32_t a = 0, l = 0, e = 0;
++      if (std::sscanf(value.c_str(), "%x,%x,%x", &a, &l, &e) == 3 && l && e) {
++        s.watch_address = a;
++        s.watch_length = l;
++        s.watch_entry = e;
++      }
++    } else if (key == "log") {
++      s.log_remaining = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++    } else if (key == "skip_vs" || key == "skip_ps" || key == "skip_vf" || key == "dump") {
++      auto& set = key == "skip_vs"   ? s.skip_vs
++                  : key == "skip_ps" ? s.skip_ps
++                  : key == "skip_vf" ? s.skip_vf
++                                     : s.dump;
++      std::stringstream ss(value);
++      std::string item;
++      while (std::getline(ss, item, ',')) {
++        item = trim(item);
++        if (!item.empty()) set.insert(std::strtoull(item.c_str(), nullptr, 16));
++      }
++    }
++  }
++  REXGPU_INFO("DRAWDBG reloaded: {} skip_vs, {} skip_ps, {} skip_vf, {} dump, log {}",
++              s.skip_vs.size(), s.skip_ps.size(), s.skip_vf.size(), s.dump.size(),
++              s.log_remaining);
++}
++
++// Range to invalidate before the current draw ({0, 0} = none).
++std::pair<uint32_t, uint32_t> DrawDebugForceUpload() {
++  DrawDebugState& s = GetDrawDebugState();
++  if (!s.enabled) return {0, 0};
++  std::lock_guard lock(s.mutex);
++  return {s.force_address, s.force_length};
++}
++
++// interp = 1: run PGR4's skinned world VS (72EE8062BF5E764A) on the CPU interpreter for every strip
++// index and log triangles whose NDC extent is huge while all vertices are in front of the camera.
++struct PositionSink : ShaderInterpreter::ExportSink {
++  float position[4];
++  bool written = false;
++  void Export(ucode::ExportRegister reg, const float* value, uint32_t mask) override {
++    if (reg != ucode::ExportRegister::kVSPosition) return;
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (mask & (1 << i)) position[i] = value[i];
++    }
++    written = true;
++  }
++};
++
++void DrawDebugInterpret(const RegisterFile& regs, const memory::Memory& memory, const Shader& vs) {
++  DrawDebugState& s = GetDrawDebugState();
++  if (!s.enabled || !s.interp || vs.ucode_data_hash() != UINT64_C(0x72EE8062BF5E764A)) return;
++  if (!ShaderInterpreter::CanInterpretShader(vs)) return;
++  if (s.interp_vf && (regs.GetVertexFetch(95).address << 2) != s.interp_vf) return;
++  auto initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (initiator.source_select != xenos::SourceSelect::kDMA ||
++      initiator.index_size != xenos::IndexFormat::kInt16) {
++    return;
++  }
++  auto dma_size = regs.Get<reg::VGT_DMA_SIZE>();
++  xenos::Endian endian = dma_size.swap_mode == xenos::Endian::k8in32    ? xenos::Endian::k8in16
++                         : dma_size.swap_mode == xenos::Endian::k16in32 ? xenos::Endian::kNone
++                                                                        : dma_size.swap_mode;
++  const uint16_t* ib =
++      memory.TranslatePhysical<const uint16_t*>(regs[XE_GPU_REG_VGT_DMA_BASE] & ~uint32_t(1));
++  bool reset_enabled = regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena;
++  uint32_t reset_index = regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  static ShaderInterpreter* interpreter = nullptr;
++  if (!interpreter) interpreter = new ShaderInterpreter(regs, memory);
++  interpreter->SetShader(vs);
++  PositionSink sink;
++  interpreter->SetExportSink(&sink);
++  struct V {
++    uint32_t index;
++    float p[4];
++  };
++  std::vector<V> strip;
++  uint32_t count = std::min<uint32_t>(initiator.num_indices, dma_size.num_words);
++  ++s.interp_draws;
++  for (uint32_t i = 0; i <= count; ++i) {
++    uint32_t raw = i < count ? xenos::GpuSwap(uint32_t(ib[i]), endian) & 0xFFFF : UINT32_MAX;
++    if (i == count || (reset_enabled && raw == reset_index)) {
++      strip.clear();
++      continue;
++    }
++    uint32_t index = std::min(max_index, std::max(min_index, (raw + index_offset) & 0xFFFFFF));
++    std::memset(interpreter->temp_registers(), 0, sizeof(float) * 4 * xenos::kMaxShaderTempRegisters);
++    interpreter->temp_registers()[0] = float(index);
++    sink.written = false;
++    interpreter->Execute();
++    V v{index, {sink.position[0], sink.position[1], sink.position[2], sink.position[3]}};
++    strip.push_back(v);
++    if (strip.size() < 3) continue;
++    const V* t[3] = {&strip[strip.size() - 3], &strip[strip.size() - 2], &strip[strip.size() - 1]};
++    bool front = true;
++    float min_x = FLT_MAX, max_x = -FLT_MAX, min_y = FLT_MAX, max_y = -FLT_MAX;
++    for (const V* tv : t) {
++      if (!(tv->p[3] > 0.01f)) front = false;
++      if (!front) break;
++      float x = tv->p[0] / tv->p[3], y = tv->p[1] / tv->p[3];
++      min_x = std::min(min_x, x);
++      max_x = std::max(max_x, x);
++      min_y = std::min(min_y, y);
++      max_y = std::max(max_y, y);
++    }
++    // Only triangles anchored near the Alexander Column top in the St Petersburg start-line view.
++    bool anchored = false;
++    if (front) {
++      for (const V* tv : t) {
++        float x = tv->p[0] / tv->p[3], y = tv->p[1] / tv->p[3];
++        anchored |= y > 0.3f && std::abs(x) < 1.0f;
++      }
++    }
++    float area = 0.0f;
++    if (front) {
++      float ax = t[1]->p[0] / t[1]->p[3] - t[0]->p[0] / t[0]->p[3];
++      float ay = t[1]->p[1] / t[1]->p[3] - t[0]->p[1] / t[0]->p[3];
++      float bx = t[2]->p[0] / t[2]->p[3] - t[0]->p[0] / t[0]->p[3];
++      float by = t[2]->p[1] / t[2]->p[3] - t[0]->p[1] / t[0]->p[3];
++      area = 0.5f * std::abs(ax * by - ay * bx);
++    }
++    // Also triangles with an anchored vertex in front and another one behind the camera (clipped
++    // into a sliver), skipping degenerate strip triangles (repeated index).
++    bool straddling = false;
++    if (!front && t[0]->index != t[1]->index && t[1]->index != t[2]->index &&
++        t[0]->index != t[2]->index) {
++      bool any_behind = false;
++      for (const V* tv : t) {
++        if (tv->p[3] > 0.01f) {
++          float x = tv->p[0] / tv->p[3], y = tv->p[1] / tv->p[3];
++          straddling |= y > 0.3f && std::abs(x) < 1.0f;
++        } else {
++          any_behind = true;
++        }
++      }
++      straddling &= any_behind;
++    }
++    bool odd = false;
++    if (s.interp_vf && t[0]->index != t[1]->index && t[1]->index != t[2]->index &&
++        t[0]->index != t[2]->index) {
++      bool any_front = false, any_behind = false;
++      for (const V* tv : t) {
++        (tv->p[3] > 0.01f ? any_front : any_behind) = true;
++      }
++      odd = (any_front && any_behind) || (front && (max_x - min_x > 0.3f || max_y - min_y > 0.3f));
++    }
++    if (odd || straddling ||
++        (front && anchored && area > 0.02f && (max_x - min_x > 0.4f || max_y - min_y > 0.4f))) {
++      if (++s.interp_events <= 200000) {
++        std::string vs_text;
++        xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95);
++        const uint8_t* vb = memory.TranslatePhysical<const uint8_t*>(f95.address << 2);
++        float vpi;
++        std::memcpy(&vpi, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 55 + 1], 4);
++        for (const V* tv : t) {
++          uint32_t local = vpi >= 1.0f ? tv->index % uint32_t(vpi) : tv->index;
++          uint32_t w[6];
++          for (uint32_t k = 0; k < 6; ++k) {
++            std::memcpy(&w[k], vb + local * 28 + k * 4, 4);
++            w[k] = xenos::GpuSwap(w[k], f95.endian);
++          }
++          float lp[3];
++          std::memcpy(lp, w, 12);
++          vs_text += fmt::format(" [i{} bone {} local ({:g},{:g},{:g}) clip ({:g},{:g},{:g},{:g})]",
++                                 tv->index, w[5] & 0xFF, lp[0], lp[1], lp[2], tv->p[0], tv->p[1],
++                                 tv->p[2], tv->p[3]);
++        }
++        float c55x;
++        std::memcpy(&c55x, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 55], 4);
++        REXGPU_INFO("DRAWDBG interp: draw {} ib {:08X} n {} off {} min {} max {} vf95 {:08X} "
++                    "c55.x {:g} area {:g} tri{}",
++                    s.interp_draws, regs[XE_GPU_REG_VGT_DMA_BASE], count, index_offset, min_index,
++                    max_index, regs.GetVertexFetch(95).address << 2, c55x, area, vs_text);
++      }
++    }
++  }
++}
++
++float HalfToFloat(uint16_t h) {  // IEEE half (as D3D10+ f16tof32)
++  uint32_t sign = uint32_t(h & 0x8000) << 16, exp = (h >> 10) & 31, man = h & 1023;
++  uint32_t bits;
++  if (exp == 31) {
++    bits = sign | 0x7F800000 | (man << 13);
++  } else if (exp == 0) {
++    float f = std::ldexp(float(man), -24);
++    return sign ? -f : f;
++  } else {
++    bits = sign | ((exp + 112) << 23) | (man << 13);
++  }
++  float f;
++  std::memcpy(&f, &bits, 4);
++  return f;
++}
++
++bool DrawDebugSkip(const RegisterFile& regs, const Shader& vs, const Shader* ps,
++                   xenos::PrimitiveType primitive_type, uint32_t index_count,
++                   bool indexed, uint32_t ib_base, size_t ib_length, bool ib_32bit,
++                   const uint8_t* physical_base) {
++  DrawDebugState& s = GetDrawDebugState();
++  if (!s.enabled) return false;
++  std::lock_guard lock(s.mutex);
++  if ((s.draws++ & 1023) == 0) ReloadDrawDebugFile(s);
++  if (s.watch_length && (s.draws & 31) == 0) {
++    const uint8_t* now = physical_base + s.watch_address;
++    if (s.watch_copy.empty()) {
++      s.watch_copy.assign(now, now + s.watch_length);
++    } else if (std::memcmp(now, s.watch_copy.data(), s.watch_length)) {
++      uint32_t changed = 0, first = UINT32_MAX, last = 0;
++      for (uint32_t i = 0; i < s.watch_length / s.watch_entry; ++i) {
++        if (std::memcmp(now + i * s.watch_entry, s.watch_copy.data() + i * s.watch_entry,
++                        s.watch_entry)) {
++          ++changed;
++          first = std::min(first, i);
++          last = i;
++        }
++      }
++      REXGPU_INFO("DRAWDBG watch #{}: {} entries changed ({}..{})", s.draws, changed, first, last);
++      std::memcpy(s.watch_copy.data(), now, s.watch_length);
++    }
++  }
++  uint64_t vs_hash = vs.ucode_data_hash(), ps_hash = ps ? ps->ucode_data_hash() : 0;
++  bool skip = s.skip_vs.count(vs_hash) || s.skip_ps.count(ps_hash);
++  std::string fetches;
++  for (const auto& binding : vs.vertex_bindings()) {
++    xenos::xe_gpu_vertex_fetch_t f = regs.GetVertexFetch(binding.fetch_constant);
++    skip = skip || s.skip_vf.count(f.address << 2);
++    if (s.log_remaining) {
++      fetches += fmt::format(" vf{}:{:08X}+{:X}/s{}", binding.fetch_constant, f.address << 2,
++                             f.size << 2, binding.stride_words * 4);
++    }
++  }
++  if (s.late_writes) {
++    // Recheck the ranges used by recent crowd draws; anything changed within the window of use
++    // means the CPU wrote bones after the GPU (command processor) had already read them.
++    if ((s.draws & 31) == 0) {
++      for (auto it = s.used.begin(); it != s.used.end();) {
++        const uint8_t* now = physical_base + it->address;
++        if (std::memcmp(now, it->data.data(), it->length)) {
++          ++s.late_events;
++          if (s.late_events <= 40 || (s.late_events & 255) == 0) {
++            REXGPU_INFO("DRAWDBG late write: draw #{} used {:08X}+{:X}, changed {} draws later "
++                        "({} events / {} draws checked)",
++                        it->draw, it->address, it->length, s.draws - it->draw, s.late_events,
++                        s.late_checked);
++          }
++          it = s.used.erase(it);
++        } else if (s.draws - it->draw > s.late_writes) {
++          ++s.late_checked;
++          it = s.used.erase(it);
++        } else {
++          ++it;
++        }
++      }
++    }
++    if ((s.draws & 0xFFFF) == 0) {
++      REXGPU_INFO("DRAWDBG late status: {} events / {} draws checked, {} pending", s.late_events,
++                  s.late_checked, s.used.size());
++    }
++    if (vs_hash == UINT64_C(0x72EE8062BF5E764A) && s.used.size() < 16384) {
++      xenos::xe_gpu_vertex_fetch_t f94 = regs.GetVertexFetch(94);
++      float base;
++      std::memcpy(&base, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 55], 4);
++      DrawDebugState::UsedRange r;
++      r.draw = s.draws;
++      r.address = (f94.address << 2) + uint32_t(base) * 24;
++      r.length = 8 * 24;
++      const uint8_t* e = physical_base + r.address;
++      r.data.assign(e, e + r.length);
++      s.used.push_back(std::move(r));
++    }
++  }
++  if ((s.detect || s.skip_spread) && vs_hash == UINT64_C(0x72EE8062BF5E764A) && indexed &&
++      !ib_32bit) {
++    float threshold = float(s.skip_spread ? s.skip_spread : s.detect);
++    // PGR4 world shader: per instance (index / c55.y), bones = vertex byte + c[55 + a0].x into the
++    // vf94 half palette; flag bones far from their skeleton and odd instance matrices.
++    xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95), f94 = regs.GetVertexFetch(94);
++    auto c = [&](uint32_t i, uint32_t comp) {
++      float v;
++      std::memcpy(&v, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * i + comp], 4);
++      return v;
++    };
++    float verts_per_instance = c(55, 1), consts_per_instance = c(255, 0);
++    const uint8_t* ib = physical_base + ib_base;
++    uint32_t max_index = 0;
++    for (uint32_t i = 0; i < index_count && i * 2 < ib_length; ++i) {
++      uint16_t v;
++      std::memcpy(&v, ib + i * 2, 2);
++      v = uint16_t((v >> 8) | (v << 8));
++      if (v != 0xFFFF) max_index = std::max<uint32_t>(max_index, v);
++    }
++    uint32_t vb_vertices = (f95.size << 2) / 28;
++    uint32_t instances =
++        verts_per_instance >= 1.0f ? uint32_t(float(max_index) / verts_per_instance) + 1 : 1;
++    std::vector<uint32_t> bones;
++    for (uint32_t v = 0; v < vb_vertices; ++v) {
++      uint32_t raw;
++      std::memcpy(&raw, physical_base + (f95.address << 2) + v * 28 + 20, 4);
++      uint32_t b = xenos::GpuSwap(raw, f95.endian) & 0xFF;
++      if (std::find(bones.begin(), bones.end(), b) == bones.end()) bones.push_back(b);
++    }
++    for (uint32_t inst = 0; inst < instances && inst < 64; ++inst) {
++      uint32_t a0 = uint32_t(float(inst) * consts_per_instance + 0.5f);
++      uint32_t base = uint32_t(c(55 + a0, 0));
++      std::string problem;
++      for (uint32_t r = 0; r < 3; ++r) {
++        float len = std::sqrt(c(52 + a0 + r, 0) * c(52 + a0 + r, 0) +
++                              c(52 + a0 + r, 1) * c(52 + a0 + r, 1) +
++                              c(52 + a0 + r, 2) * c(52 + a0 + r, 2));
++        if (!(len > 0.2f && len < 5.0f) || !(std::abs(c(52 + a0 + r, 3)) < 1e6f)) {
++          problem += fmt::format(" inst row{} len {:g} t {:g}", r, len, c(52 + a0 + r, 3));
++        }
++      }
++      std::vector<std::array<float, 3>> t;
++      std::vector<uint32_t> t_bone;
++      for (uint32_t b : bones) {
++        const uint8_t* e = physical_base + (f94.address << 2) + (base + b) * 24;
++        std::array<float, 3> tr;
++        bool sentinel = false;
++        for (uint32_t r = 0; r < 3; ++r) {
++          uint32_t d;
++          std::memcpy(&d, e + (2 * r + 1) * 4, 4);
++          d = xenos::GpuSwap(d, f94.endian);
++          sentinel |= ((d >> 10) & 31) == 31;  // float16 NaN/Inf, either sign
++          tr[r] = HalfToFloat(uint16_t(d & 0xFFFF));
++        }
++        if (!sentinel) {
++          t.push_back(tr);
++          t_bone.push_back(b);
++        }
++      }
++      if (t.size() >= 2) {
++        for (uint32_t axis = 0; axis < 3; ++axis) {
++          std::vector<float> col;
++          for (auto& v : t) col.push_back(v[axis]);
++          std::nth_element(col.begin(), col.begin() + col.size() / 2, col.end());
++          float med = col[col.size() / 2];
++          for (size_t i = 0; i < t.size(); ++i) {
++            if (!(std::abs(t[i][axis] - med) < threshold)) {
++              if (s.skip_spread) skip = true;
++              problem += fmt::format(" bone {} axis {} = {:g} (median {:g})", t_bone[i], axis,
++                                     t[i][axis], med);
++            }
++          }
++        }
++      }
++      if (s.detect && !problem.empty() && ++s.detect_events <= 5000) {
++        REXGPU_INFO("DRAWDBG detect #{} vf95 {:08X} inst {}/{} base {} bones {}:{}", s.draws,
++                    f95.address << 2, inst, instances, base, bones.size(), problem);
++      }
++    }
++  }
++  if (s.jumps && vs_hash == UINT64_C(0x72EE8062BF5E764A)) {
++    xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95), f94 = regs.GetVertexFetch(94);
++    auto c = [&](uint32_t i, uint32_t comp) {
++      float v;
++      std::memcpy(&v, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * i + comp], 4);
++      return v;
++    };
++    // Instance 0 only. Key: mesh address + world position rounded to 1 unit.
++    uint64_t key = (uint64_t(f95.address) << 32) ^
++                   (uint64_t(int64_t(c(52, 3))) * 73856093) ^
++                   (uint64_t(int64_t(c(53, 3))) * 19349663) ^ (uint64_t(int64_t(c(54, 3))) * 83492791);
++    uint32_t base = uint32_t(c(55, 0));
++    std::vector<uint32_t> bones;
++    uint32_t vb_vertices = (f95.size << 2) / 28;
++    for (uint32_t v = 0; v < vb_vertices; ++v) {
++      uint32_t raw;
++      std::memcpy(&raw, physical_base + (f95.address << 2) + v * 28 + 20, 4);
++      uint32_t b = xenos::GpuSwap(raw, f95.endian) & 0xFF;
++      if (std::find(bones.begin(), bones.end(), b) == bones.end()) bones.push_back(b);
++    }
++    std::sort(bones.begin(), bones.end());
++    std::vector<std::array<float, 4>> now;
++    for (uint32_t b : bones) {
++      const uint8_t* e = physical_base + (f94.address << 2) + (base + b) * 24;
++      std::array<float, 4> tr{float(b), 0, 0, 0};
++      for (uint32_t r = 0; r < 3; ++r) {
++        uint32_t d;
++        std::memcpy(&d, e + (2 * r + 1) * 4, 4);
++        d = xenos::GpuSwap(d, f94.endian);
++        tr[1 + r] = HalfToFloat(uint16_t(d & 0xFFFF));
++      }
++      now.push_back(tr);
++    }
++    auto it = s.bone_history.find(key);
++    if (it != s.bone_history.end() && it->second.size() == now.size()) {
++      for (size_t i = 0; i < now.size(); ++i) {
++        float dx = now[i][1] - it->second[i][1], dy = now[i][2] - it->second[i][2],
++              dz = now[i][3] - it->second[i][3];
++        float d = std::sqrt(dx * dx + dy * dy + dz * dz);
++        if (d > 600.0f && std::isfinite(d) && ++s.jump_events <= 300) {
++          REXGPU_INFO("DRAWDBG jump #{} vf95 {:08X} world ({:g},{:g},{:g}) base {} bone {}: "
++                      "({:g},{:g},{:g}) -> ({:g},{:g},{:g})",
++                      s.draws, f95.address << 2, c(52, 3), c(53, 3), c(54, 3), base,
++                      uint32_t(now[i][0]), it->second[i][1], it->second[i][2], it->second[i][3],
++                      now[i][1], now[i][2], now[i][3]);
++        }
++      }
++    }
++    s.bone_history[key] = std::move(now);
++  }
++  if (s.skip_sentinel && vs_hash == UINT64_C(0x72EE8062BF5E764A)) {
++    // Skip PGR4 crowd draws whose first bone has the float16 0x7FFF (NaN) y translation sentinel.
++    xenos::xe_gpu_vertex_fetch_t f94 = regs.GetVertexFetch(94);
++    float base;
++    std::memcpy(&base, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 55], 4);
++    const uint8_t* e = physical_base + (f94.address << 2) + uint32_t(base) * 24;
++    uint32_t dword;
++    std::memcpy(&dword, e + 12, 4);  // row 1 .zw in 8in32 order
++    dword = xenos::GpuSwap(dword, f94.endian);
++    if (((dword >> 10) & 31) == 31 || ((dword >> 26) & 31) == 31) skip = true;
++    if (s.skip_sentinel >= 2 && !skip) {
++      xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95);
++      const uint8_t* vb = physical_base + (f95.address << 2);
++      uint32_t vertex_count = (f95.size << 2) / 28;
++      uint32_t partial_bad = 0, total = 0;
++      uint64_t seen[4] = {};
++      for (uint32_t v = 0; v < vertex_count; ++v) {
++        uint32_t raw;
++        std::memcpy(&raw, vb + v * 28 + 20, 4);
++        uint32_t b = xenos::GpuSwap(raw, f95.endian) & 0xFF;
++        if (seen[b >> 6] & (uint64_t(1) << (b & 63))) continue;
++        seen[b >> 6] |= uint64_t(1) << (b & 63);
++        ++total;
++        std::memcpy(&dword, physical_base + (f94.address << 2) + (uint32_t(base) + b) * 24 + 12, 4);
++        dword = xenos::GpuSwap(dword, f94.endian);
++        if (((dword >> 10) & 31) == 31 || ((dword >> 26) & 31) == 31) ++partial_bad;
++      }
++      if (partial_bad) {
++        skip = true;
++        if ((++s.partial_logged & 255) == 1) {
++          REXGPU_INFO("DRAWDBG partial sentinel: vf95 {:08X} base {} {}/{} bones", f95.address << 2,
++                      uint32_t(base), partial_bad, total);
++        }
++      }
++    }
++  }
++  if (s.trace_vf) {
++    // PGR4 VS 72EE8062BF5E764A: vf95 = positions etc. (stride 28, palette byte in dword 5 .x),
++    // vf94 = 3 x half4 palette entries (stride 24); entry = byte + c[55 + a0].x.
++    xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95), f94 = regs.GetVertexFetch(94);
++    if ((f95.address << 2) == s.trace_vf) {
++      auto c = [&](uint32_t i, uint32_t comp) {
++        float v;
++        std::memcpy(&v, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * i + comp], 4);
++        return v;
++      };
++      std::string consts;
++      for (uint32_t i : {4u, 5u, 6u, 7u, 52u, 53u, 54u, 55u, 255u}) {
++        consts += fmt::format(" c{}=({:g},{:g},{:g},{:g})", i, c(i, 0), c(i, 1), c(i, 2), c(i, 3));
++      }
++      const uint8_t* vb = physical_base + (f95.address << 2);
++      uint32_t vertex_count = (f95.size << 2) / 28;
++      std::vector<uint32_t> bytes;
++      for (uint32_t v = 0; v < vertex_count; ++v) {
++        uint32_t raw;
++        std::memcpy(&raw, vb + v * 28 + 20, 4);
++        uint32_t b = xenos::GpuSwap(raw, f95.endian) & 0xFF;
++        if (std::find(bytes.begin(), bytes.end(), b) == bytes.end()) bytes.push_back(b);
++      }
++      std::sort(bytes.begin(), bytes.end());
++      std::string entries;
++      uint32_t base = uint32_t(c(55, 0));
++      for (uint32_t b : bytes) {
++        uint32_t index = base + b;
++        const uint8_t* e = physical_base + (f94.address << 2) + index * 24;
++        std::string hex;
++        for (uint32_t i = 0; i < 24; ++i) hex += fmt::format("{:02X}", e[i]);
++        entries += fmt::format(" [{}]{}", index, hex);
++      }
++      REXGPU_INFO("DRAWDBG trace #{} count {} vf94 {:08X} endian {}/{} clip_cntl {:08X} vte {:08X}{} bytes{}",
++                  s.draws, index_count, f94.address << 2, uint32_t(f95.endian),
++                  uint32_t(f94.endian), regs.values[XE_GPU_REG_PA_CL_CLIP_CNTL],
++                  regs.values[XE_GPU_REG_PA_CL_VTE_CNTL], consts, entries);
++    }
++  }
++  for (const Shader* shader : {&vs, ps}) {
++    if (shader && s.dump.erase(shader->ucode_data_hash())) {
++      REXGPU_INFO("DRAWDBG dump {:016X}:\n{}", shader->ucode_data_hash(),
++                  shader->ucode_disassembly());
++    }
++  }
++  if (s.log_remaining) {
++    --s.log_remaining;
++    std::string indices = indexed ? fmt::format(" ib:{:08X}+{:X}/{}", ib_base, ib_length,
++                                                ib_32bit ? 32 : 16)
++                                  : std::string(" ib:none");
++    float alpha_ref;
++    std::memcpy(&alpha_ref, &regs.values[XE_GPU_REG_RB_ALPHA_REF], 4);
++    REXGPU_INFO("DRAWDBG #{} VS {:016X} PS {:016X} prim {} count {}{}{} colorcontrol {:08X} "
++                "alpha_ref {:g} msaa {} blend0 {:08X} reset {}/{:X} ffff {} vtx [{:X},{:X}] off {:X}{}",
++                s.draws, vs_hash, ps_hash, uint32_t(primitive_type), index_count, indices, fetches,
++                regs.values[XE_GPU_REG_RB_COLORCONTROL], alpha_ref,
++                uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples),
++                regs.values[XE_GPU_REG_RB_BLENDCONTROL0],
++                uint32_t(regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena),
++                regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx, [&] {
++                  if (!indexed || ib_32bit) return 0u;
++                  uint32_t n = 0;
++                  const uint16_t* ib = reinterpret_cast<const uint16_t*>(physical_base + ib_base);
++                  for (uint32_t i = 0; i < index_count && i * 2 < ib_length; ++i) n += ib[i] == 0xFFFF;
++                  return n;
++                }(),
++                regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx, regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx,
++                regs.Get<reg::VGT_INDX_OFFSET>().indx_offset, skip ? " SKIP" : "");
++  }
++  return skip;
++}
++}  // namespace
++
++// pgr4_crowd_cull: PGR4's skinned world vertex shader (ucode hash 72EE8062BF5E764A) draws instances of
++// index / c55.y vertices; each vertex is skinned by one bone, palette entry = vertex byte (vf95 dword
++// 5, .x) + c[55 + a0].x, a0 = instance * c255.x, in the vf94 palette of 3 x half4 rows. The game's crowd
++// members come out with bones hundreds of units apart, so their triangles span the scene (empty
++// grandstands, flickering sky wedges). Returns true if any instance of the draw is like that. Bones
++// with float16 exponent-31 translations (the game's "hidden" marker) are ignored.
++static bool Pgr4CrowdDrawBroken(const RegisterFile& regs, const uint8_t* physical_base,
++                                const uint16_t* indices, uint32_t index_count) {
++  xenos::xe_gpu_vertex_fetch_t f95 = regs.GetVertexFetch(95), f94 = regs.GetVertexFetch(94);
++  auto c = [&](uint32_t i, uint32_t comp) {
++    float v;
++    std::memcpy(&v, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * i + comp], 4);
++    return v;
++  };
++  float verts_per_instance = c(55, 1), consts_per_instance = c(255, 0);
++  uint32_t max_index = 0;
++  for (uint32_t i = 0; i < index_count; ++i) {
++    uint16_t v = uint16_t((indices[i] >> 8) | (indices[i] << 8));
++    if (v != 0xFFFF) max_index = std::max<uint32_t>(max_index, v);
++  }
++  uint32_t instances =
++      verts_per_instance >= 1.0f ? uint32_t(float(max_index) / verts_per_instance) + 1 : 1;
++  uint64_t bone_mask[4] = {};
++  uint32_t vb_vertices = (f95.size << 2) / 28;
++  const uint8_t* vb = physical_base + (f95.address << 2);
++  for (uint32_t v = 0; v < vb_vertices; ++v) {
++    uint32_t raw;
++    std::memcpy(&raw, vb + v * 28 + 20, 4);
++    uint32_t b = xenos::GpuSwap(raw, f95.endian) & 0xFF;
++    bone_mask[b >> 6] |= uint64_t(1) << (b & 63);
++  }
++  float limit = float(REXCVAR_GET(pgr4_crowd_cull_spread));
++  float t[256][3];
++  for (uint32_t inst = 0; inst < instances && inst < 64; ++inst) {
++    uint32_t a0 = uint32_t(float(inst) * consts_per_instance + 0.5f);
++    if (55 + a0 >= 256) break;
++    uint32_t base = uint32_t(c(55 + a0, 0));
++    uint32_t count = 0;
++    for (uint32_t b = 0; b < 256; ++b) {
++      if (!(bone_mask[b >> 6] & (uint64_t(1) << (b & 63)))) continue;
++      uint32_t entry = (f94.address << 2) + (base + b) * 24;
++      if (entry + 24 > SharedMemory::kBufferSize) continue;
++      bool hidden = false;
++      for (uint32_t r = 0; r < 3; ++r) {
++        uint32_t d;
++        std::memcpy(&d, physical_base + entry + (2 * r + 1) * 4, 4);
++        d = xenos::GpuSwap(d, f94.endian);
++        hidden |= ((d >> 10) & 31) == 31;
++        t[count][r] = HalfToFloat(uint16_t(d & 0xFFFF));
++      }
++      if (!hidden) ++count;
++    }
++    if (count < 2) continue;
++    for (uint32_t axis = 0; axis < 3; ++axis) {
++      float col[256];
++      for (uint32_t i = 0; i < count; ++i) col[i] = t[i][axis];
++      std::nth_element(col, col + count / 2, col + count);
++      float median = col[count / 2];
++      for (uint32_t i = 0; i < count; ++i) {
++        if (std::abs(t[i][axis] - median) > limit) return true;
++      }
++    }
++  }
++  return false;
++}
++
+ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+                                       bool major_mode_explicit) {
+@@ -2324,6 +3047,29 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+       return true;
+     }
+   }
++  if (DrawDebugSkip(regs, *vertex_shader, pixel_shader, primitive_type, index_count,
++                    index_buffer_info != nullptr,
++                    index_buffer_info ? index_buffer_info->guest_base : 0,
++                    index_buffer_info ? index_buffer_info->length : 0,
++                    index_buffer_info &&
++                        index_buffer_info->format == xenos::IndexFormat::kInt32,
++                    memory_->TranslatePhysical<const uint8_t*>(0))) {
++    return true;
++  }
++  if (REXCVAR_GET(pgr4_crowd_cull) &&
++      vertex_shader->ucode_data_hash() == UINT64_C(0x72EE8062BF5E764A) && index_buffer_info &&
++      index_buffer_info->format == xenos::IndexFormat::kInt16 &&
++      index_buffer_info->guest_base + uint64_t(index_count) * 2 <= SharedMemory::kBufferSize &&
++      Pgr4CrowdDrawBroken(regs, memory_->TranslatePhysical<const uint8_t*>(0),
++                          memory_->TranslatePhysical<const uint16_t*>(index_buffer_info->guest_base),
++                          index_count)) {
++    return true;
++  }
++  DrawDebugInterpret(regs, *memory_, *vertex_shader);
++  if (auto force = DrawDebugForceUpload(); force.second) {
++    shared_memory_->MemoryInvalidationCallback(force.first, force.second, true);
++  }
++
+   bool memexport_used_pixel = pixel_shader && (pixel_shader->memexport_eM_written() != 0);
+   bool memexport_used = memexport_used_vertex || memexport_used_pixel;
+ 
