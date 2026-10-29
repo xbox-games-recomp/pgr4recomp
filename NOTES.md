@@ -136,3 +136,26 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
   presenting frames that come out black (not a stall). `--readback_resolve=some` does not change it. The SDK has
   no cvar to pick the Vulkan backend (`any` = D3D12 first). Next: Xenia ground truth for this screen (needs a pad
   or a focused window for keyboard input), then GPU-side inspection of what the front end draws.
+
+## 10. Black front end fixed: ROV render target path (2026-10-28)
+
+- Exact sequence with a save: intro -> (START) title "PRESS START TO CONTINUE" -> (START) the title scene loads
+  `frontend_mad.bpr` (missing, harmless) + Enzo, still showing the title -> (A) headless XamShowDeviceSelectorUI,
+  profile content mount -> **Gamer Profiles "Your profile has been loaded"** dialog -> (A) Main Menu -> Single
+  Player -> Arcade Mode -> "Catch Me If You Can" difficulty card -> St Petersburg race. Before the fix everything
+  from the Gamer Profiles dialog on was black (pixel mean exactly 0) on the D3D12 default host render target path
+  (`render_target_path_d3d12` "" -> RTV); that is also the fresh-profile "black input-only screens" of section 8.
+- `--render_target_path_d3d12=rov` (EDRAM emulated in pixel shaders with rasterizer-ordered views) renders all of
+  it, and runs at 30 fps in the menus and in the race (dips only while loading). `--gamma_render_target_as_unorm16=false`
+  does not help, so it is not the 8_8_8_8_GAMMA emulation.
+- Fix: `Pgr4recompApp::OnPreSetup` loads the GPU plugin itself (so the plugin's cvars are registered) and sets
+  `render_target_path_d3d12=rov` unless the command line / config set it. `--render_target_path_d3d12=rtv`
+  brings the bug back for comparison.
+- RTV root cause not pinned down. `--log_level=debug` logs render target creation: no new RT is created when the
+  dialog appears; the front end uses 2_10_10_10_FLOAT (fmt 3) RTs at 1x/2x/4x MSAA, 8_8_8_8 and a 80x8192
+  16_16_16_16_FLOAT (fmt 7) + 32_FLOAT (fmt 14) pair at EDRAM base 0 (looks like a luminance/exposure chain).
+  Hypothesis: RTV stores 2_10_10_10_FLOAT as R16G16B16A16_FLOAT, which keeps negatives/Inf/NaN that the real
+  7e3 format clamps, so an exposure value goes NaN/0 and the whole tonemapped frame comes out black. Worth
+  knowing for the native renderer: clamp HDR targets like the 7e3 format does.
+- Gotcha: passing the same cvar twice makes the exe exit at startup with no log; `run.ps1` now drops its
+  default `--log_level=info` when an explicit `--log_level=` is passed.

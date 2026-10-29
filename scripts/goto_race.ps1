@@ -1,5 +1,5 @@
 # Launch pgr4recomp with the live pad file and drive it into the first-run St Petersburg race.
-# Boot -> intro -> (black, input-only title/profile screens) -> event card -> race.
+# Boot -> intro -> title -> profile dialog / menus (mashing START,A) -> event card -> race.
 # Usage: & scripts\goto_race.ps1 [tag]   (command file: work\pad_cmd.txt)
 param([string]$Tag = 'race')
 $root = Split-Path $PSScriptRoot -Parent
