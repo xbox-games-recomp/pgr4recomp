@@ -159,3 +159,41 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
   knowing for the native renderer: clamp HDR targets like the 7e3 format does.
 - Gotcha: passing the same cvar twice makes the exe exit at startup with no log; `run.ps1` now drops its
   default `--log_level=info` when an explicit `--log_level=` is passed.
+
+## 11. 60 fps, race performance, sky wedges, AA settings (2026-10-28)
+
+- **60 fps.** `0x826957EC lwz r10,0x350C(r31)` in the D3D swap path loads the device PresentationInterval
+  (PGR4: 2 = 30 fps) and maps it to the VdSwap interval. Same site as the Xenia Canary game-patches "60 FPS"
+  patch (author illusion; its "Disable Motion Blur"/"Disable HDR" sites 0x829A9A9F/0x829A89EF are the `li r11,1`
+  immediates and match this exe too). Byte patches do not reach recompiled code, so it is a codegen
+  `[[midasm_hook]]` (`config/default.toml`, after_instruction) -> `Pgr4PresentIntervalHook` in
+  `src/game_patches.cpp`, cvar `pgr4_60fps` (default true). Rerun `rexglue codegen` after editing hooks.
+  Gameplay timing is real-time (race clock matches the 30 fps run); the patch notes say some videos may
+  play at double speed.
+- **Race perf.** With 60 fps unlocked, races ran 36-40 fps. Thread sampling (`scripts/tsample.py`): the guest
+  render thread was 98% busy, ~45% of it spinning in the D3D fence poll `sub_82697970`; the GPU command
+  processor thread was mostly idle-spinning. Culprit: the SDK cvar `clear_memory_page_state` (default true,
+  ReXGlue addition, not upstream Xenia) drops every CPU-uploaded shared-memory page at each frame end, so all
+  geometry/textures are re-uploaded each frame. Off -> locked ~60 fps, no visible difference (write watches
+  still catch CPU writes). Now defaulted off in `OnPreSetup`. Benchmarks (`scripts/bench.ps1`, 960x540, RTX
+  4080 SUPER): default 38/39, readback_memexport off 38, submit_on_primary_buffer_end off 38, vsync off 39,
+  RTV 51/37, mrt clamp off 38, **clear_memory_page_state off 59-60**.
+- **Sky wedges** (grey in St Petersburg day, black/orange at night): intermittent huge triangles; in the
+  St Petersburg start-line view always fanning from the top of the Alexander Column toward the top-right
+  screen edge. **Still open.** `scripts/sky_bench.ps1` (car parked on the start line, static camera, N
+  snapshots; `sky_probe.py` counts frames whose sky deviates from the median) measures a ~3-6% frame rate:
+  default 1/40, 3/60, 4/40; readback_memexport off 8/60; RTV 0/60; occlusion_query_enable=false 0/60 then
+  6/120 (so not occlusion queries; the 0/60 runs were luck at this base rate, RTV is unproven too). Not
+  clear_memory_page_state either (4/40 with it off). Vertex kill (OR mode -> position.w = NaN only) was not
+  actually tested: the diagnostic DLL never reached the game folder (see gotcha below). Next: an SDK debug
+  cvar to skip draws by VS/PS hash and bisect with sky_bench, or log draws whose CPU-executed VS output has
+  w <= 0 / NaN (DrawExtentEstimator already runs VS on the CPU).
+- **Graphics settings file.** The SDK loads `<exe dir>/pgr4recomp.toml` (flat `cvar = value`). The build
+  copies `config/pgr4recomp.toml` there once (not overwritten): pgr4_60fps, resolution_scale (SSAA; the game's
+  own EDRAM 2x/4x MSAA stays on), swap_post_effect (fxaa / fxaa_extreme), present_effect (bilinear/cas/fsr),
+  anisotropic_override (5 = 16x).
+- Gotchas: the game build only copies the SDK DLLs at configure time, so an SDK rebuild does not reach
+  `out\build\...` by itself (a vertex-kill diagnostic silently never ran). `scripts/*.py` that use PIL must run
+  without `-I` (PIL is in user site-packages); the PowerShell `python` lacks PIL entirely.
+- One bench with `--resolution_scale=2` stopped presenting right after the front-end car loaded; a rerun was
+  fine (title 52 fps, race 30-35 fps before the page-state fix; after it 55-59 fps at 2x). Watch for it.
