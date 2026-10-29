@@ -1,0 +1,384 @@
+diff --git a/include/rex/graphics/gpu_frame_stats.h b/include/rex/graphics/gpu_frame_stats.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/graphics/gpu_frame_stats.h
+@@ -0,0 +1,67 @@
++/**
++ * @file        gpu_frame_stats.h
++ * @brief       Cumulative GPU command processor counters for the host app.
++ *
++ * The rexgpu-xenos plugin exports `rex_gpu_frame_stats()`; an app fetches it with
++ * GetProcAddress(GetModuleHandle("rexgpu-xenos.dll"), "rex_gpu_frame_stats") and diffs snapshots
++ * (window title fps/draws/triangles, per-frame hitch breakdowns). Every field only grows; the
++ * command processor thread writes them with relaxed atomics, so a reader sees each field
++ * consistently but not all fields at one instant.
++ */
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++namespace rex::graphics {
++
++struct GpuFrameStats {
++  uint32_t size;  // sizeof(GpuFrameStats), for layout checks across builds
++  std::atomic<uint64_t> swaps;          // IssueSwap calls
++  std::atomic<uint64_t> draws;          // host draws issued
++  std::atomic<uint64_t> triangles;      // triangles of those draws (guest primitive + index count)
++  std::atomic<uint64_t> copies;         // resolves (EDRAM copies)
++  std::atomic<uint64_t> pipelines;      // pipeline cache misses (new pipeline states)
++  std::atomic<uint64_t> shaders;        // shader translations (any thread)
++  std::atomic<uint64_t> texture_loads;  // texture (re)loads from guest memory
++  std::atomic<uint64_t> upload_bytes;   // shared memory bytes uploaded from guest memory
++  // Command processor thread time, nanoseconds.
++  std::atomic<uint64_t> ns_idle;          // waiting for the guest to write commands
++  std::atomic<uint64_t> ns_draw;          // IssueDraw total (includes pipeline, textures, copies, most uploads)
++  std::atomic<uint64_t> ns_pipeline;      // ConfigurePipeline (shader translation, PSO creation)
++  std::atomic<uint64_t> ns_textures;      // RequestTextures (texture creation, loads, untiling)
++  std::atomic<uint64_t> ns_shared_memory; // shared memory uploads from guest memory
++  std::atomic<uint64_t> ns_copy;          // IssueCopy (resolves)
++  std::atomic<uint64_t> ns_fence_wait;    // blocked on host GPU fences (CheckSubmissionFence)
++  std::atomic<uint64_t> ns_swap;          // IssueSwap
++  // Appended later.
++  std::atomic<uint64_t> texture_creates;     // new host texture resources
++  std::atomic<uint64_t> ns_texture_create;   // creating them (inside ns_textures)
++  std::atomic<uint64_t> ns_texture_load;     // loading / untiling texture data (inside ns_textures)
++  std::atomic<uint64_t> wait_reg_mem_sleeps; // WAIT_REG_MEM sleeps (guest-requested GPU waits)
++  std::atomic<uint64_t> ns_wait_reg_mem;     // WAIT_REG_MEM polling until the value matched
++  // CPU writes to GPU-watched guest memory (mostly write-watch faults on guest threads).
++  std::atomic<uint64_t> invalidations;
++  std::atomic<uint64_t> ns_invalidation;
++};
++
++GpuFrameStats& gpu_frame_stats();
++
++// Adds the time from construction to destruction to a GpuFrameStats field.
++class GpuStatsTimer {
++ public:
++  explicit GpuStatsTimer(std::atomic<uint64_t>& field) : field_(field), start_(Now()) {}
++  ~GpuStatsTimer() { field_.fetch_add(Now() - start_, std::memory_order_relaxed); }
++  static uint64_t Now();
++
++ private:
++  std::atomic<uint64_t>& field_;
++  uint64_t start_;
++};
++
++// Exported from rexgpu-xenos.dll (defined in command_processor.cpp):
++//   extern "C" const rex::graphics::GpuFrameStats* rex_gpu_frame_stats();
++using GpuFrameStatsFn = const GpuFrameStats* (*)();
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -23,6 +24,7 @@
+ #include <rex/chrono/clock.h>
+ #include <rex/graphics/command_processor.h>
+ #include <rex/graphics/flags.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/graphics/graphics_system.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/sampler_info.h>
+@@ -82,6 +84,18 @@
+ 
+ namespace rex::graphics {
+ 
++GpuFrameStats& gpu_frame_stats() {
++  static GpuFrameStats stats{sizeof(GpuFrameStats)};
++  return stats;
++}
++
++uint64_t GpuStatsTimer::Now() {
++  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                      std::chrono::steady_clock::now().time_since_epoch())
++                      .count());
++}
++
++
+ using namespace rex::graphics::xenos;
+ 
+ namespace {
+@@ -216,6 +230,7 @@
+       // We've run out of commands to execute.
+       // We spin here waiting for new ones, as the overhead of waiting on our
+       // event is too high.
++      GpuStatsTimer idle_timer(gpu_frame_stats().ns_idle);
+       PrepareForWait();
+       uint32_t loop_count = 0;
+       do {
+@@ -989,6 +1004,7 @@
+ 
+   bool is_memory = (wait_info & 0x10) != 0;
+ 
++  uint64_t wait_start = GpuStatsTimer::Now();
+   bool matched = false;
+   do {
+     uint32_t value = 0;
+@@ -1032,6 +1048,7 @@
+     if (!matched) {
+       // Wait.
+       if (wait >= 0x100) {
++        gpu_frame_stats().wait_reg_mem_sleeps.fetch_add(1, std::memory_order_relaxed);
+         PrepareForWait();
+         if (!REXCVAR_GET(vsync)) {
+           // User wants it fast and dangerous.
+@@ -1051,6 +1068,8 @@
+       }
+     }
+   } while (!matched);
++  gpu_frame_stats().ns_wait_reg_mem.fetch_add(GpuStatsTimer::Now() - wait_start,
++                                              std::memory_order_relaxed);
+ 
+   return true;
+ }
+@@ -1612,3 +1631,7 @@
+ }
+ 
+ }  // namespace rex::graphics
++
++extern "C" __declspec(dllexport) const rex::graphics::GpuFrameStats* rex_gpu_frame_stats() {
++  return &rex::graphics::gpu_frame_stats();
++}
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -16,6 +16,7 @@
+ #include <rex/assert.h>
+ #include <rex/bit.h>
+ #include <rex/dbg.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+@@ -481,6 +482,8 @@
+ 
+ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+     uint32_t physical_address_start, uint32_t length, bool exact_range) {
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_invalidation);
++  gpu_frame_stats().invalidations.fetch_add(1, std::memory_order_relaxed);
+   if (length == 0 || physical_address_start >= kBufferSize) {
+     return std::make_pair(uint32_t(0), UINT32_MAX);
+   }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -36,6 +36,7 @@
+ #include <rex/graphics/d3d12/shader.h>
+ #include <rex/graphics/pipeline/shader/interpreter.h>
+ #include <rex/graphics/flags.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/xenos.h>
+@@ -1916,6 +1917,8 @@
+ 
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_swap);
++  gpu_frame_stats().swaps.fetch_add(1, std::memory_order_relaxed);
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -3011,6 +3014,28 @@
+   return false;
+ }
+ 
++// Triangles in a guest draw, for gpu_frame_stats (lines, points and patches count as none).
++static uint64_t GuestDrawTriangleCount(xenos::PrimitiveType type, uint32_t index_count) {
++  switch (type) {
++    case xenos::PrimitiveType::kTriangleList:
++    case xenos::PrimitiveType::kTriangleWithWFlags:
++      return index_count / 3;
++    case xenos::PrimitiveType::kRectangleList:
++      return index_count / 3 * 2;
++    case xenos::PrimitiveType::kQuadList:
++      return index_count / 4 * 2;
++    case xenos::PrimitiveType::kTriangleFan:
++    case xenos::PrimitiveType::kTriangleStrip:
++    case xenos::PrimitiveType::kPolygon:
++    case xenos::PrimitiveType::k2DTriStrip:
++      return index_count >= 3 ? index_count - 2 : 0;
++    case xenos::PrimitiveType::kQuadStrip:
++      return index_count >= 4 ? (index_count - 2) / 2 * 2 : 0;
++    default:
++      return 0;
++  }
++}
++
+ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+                                       bool major_mode_explicit) {
+@@ -3018,6 +3043,7 @@
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+ 
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_draw);
+   ID3D12Device* device = GetD3D12Provider().GetDevice();
+   const RegisterFile& regs = *register_file_;
+ 
+@@ -3159,10 +3185,15 @@
+   }
+   void* pipeline_handle;
+   ID3D12RootSignature* root_signature;
+-  if (!pipeline_cache_->ConfigurePipeline(
+-          vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
+-          normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
+-          bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
++  bool pipeline_configured;
++  {
++    GpuStatsTimer pipeline_timer(gpu_frame_stats().ns_pipeline);
++    pipeline_configured = pipeline_cache_->ConfigurePipeline(
++        vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
++        normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
++        bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature);
++  }
++  if (!pipeline_configured) {
+     return false;
+   }
+   if (REXCVAR_GET(async_shader_compilation) &&
+@@ -3174,7 +3205,10 @@
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+-  texture_cache_->RequestTextures(used_texture_mask);
++  {
++    GpuStatsTimer textures_timer(gpu_frame_stats().ns_textures);
++    texture_cache_->RequestTextures(used_texture_mask);
++  }
+ 
+   // Bind the pipeline after configuring it and doing everything that may bind
+   // other pipelines.
+@@ -3395,6 +3429,9 @@
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    gpu_frame_stats().draws.fetch_add(1, std::memory_order_relaxed);
++    gpu_frame_stats().triangles.fetch_add(GuestDrawTriangleCount(primitive_type, index_count),
++                                          std::memory_order_relaxed);
+     deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
+                                             0, 0);
+   } else {
+@@ -3454,6 +3491,9 @@
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    gpu_frame_stats().draws.fetch_add(1, std::memory_order_relaxed);
++    gpu_frame_stats().triangles.fetch_add(GuestDrawTriangleCount(primitive_type, index_count),
++                                          std::memory_order_relaxed);
+     deferred_command_list_.D3DDrawIndexedInstanced(
+         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
+     if (scratch_index_buffer != nullptr) {
+@@ -3641,6 +3681,8 @@
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_copy);
++  gpu_frame_stats().copies.fetch_add(1, std::memory_order_relaxed);
+   if (!BeginSubmission(true)) {
+     return false;
+   }
+@@ -3885,6 +3927,7 @@
+                     SUCCEEDED(queue_operations_since_submission_fence_->SetEventOnCompletion(
+                         fence_value, fence_completion_event_)))) {
+         PROFILE_CMD_BUFFER_STALL();
++        GpuStatsTimer wait_timer(gpu_frame_stats().ns_fence_wait);
+         WaitForSingleObject(fence_completion_event_, INFINITE);
+         queue_operations_done_since_submission_signal_ = false;
+       } else {
+@@ -3904,6 +3947,7 @@
+     if (SUCCEEDED(
+             submission_fence_->SetEventOnCompletion(await_submission, fence_completion_event_))) {
+       PROFILE_CMD_BUFFER_STALL();
++      GpuStatsTimer wait_timer(gpu_frame_stats().ns_fence_wait);
+       WaitForSingleObject(fence_completion_event_, INFINITE);
+       submission_completed_ = submission_fence_->GetCompletedValue();
+     }
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -31,6 +31,7 @@
+ #include <rex/perf/counter.h>
+ #include <rex/filesystem.h>
+ #include <rex/graphics/d3d12/command_processor.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/graphics/d3d12/pipeline_cache.h>
+ #include <rex/graphics/d3d12/render_target_cache.h>
+ #include <rex/graphics/flags.h>
+@@ -1008,6 +1009,7 @@
+     }
+   }
+   PROFILE_PIPELINE_CACHE_MISS();
++  gpu_frame_stats().pipelines.fetch_add(1, std::memory_order_relaxed);
+ 
+   Pipeline* new_pipeline = new Pipeline;
+   std::memcpy(&new_pipeline->description, &runtime_description, sizeof(runtime_description));
+@@ -1060,6 +1062,7 @@
+                                             IDxbcConverter* dxbc_converter, IDxcUtils* dxc_utils,
+                                             IDxcCompiler* dxc_compiler) {
+   D3D12Shader& shader = static_cast<D3D12Shader&>(translation.shader());
++  gpu_frame_stats().shaders.fetch_add(1, std::memory_order_relaxed);
+ 
+   // Perform translation.
+   // If this fails the shader will be marked as invalid and ignored later.
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -17,6 +17,7 @@
+ #include <rex/cvar.h>
+ #include <rex/graphics/d3d12/command_processor.h>
+ #include <rex/graphics/d3d12/shared_memory.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
+@@ -306,6 +307,11 @@
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_shared_memory);
++  for (auto upload_range : upload_page_ranges) {
++    gpu_frame_stats().upload_bytes.fetch_add(uint64_t(upload_range.second) << page_size_log2(),
++                                             std::memory_order_relaxed);
++  }
+   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+   command_processor_.SubmitBarriers();
+   auto& command_list = command_processor_.GetDeferredCommandList();
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -23,6 +23,7 @@
+ #include <rex/graphics/d3d12/shared_memory.h>
+ #include <rex/graphics/d3d12/texture_cache.h>
+ #include <rex/graphics/flags.h>
++#include <rex/graphics/gpu_frame_stats.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/xenos.h>
+@@ -1517,6 +1518,8 @@
+ }
+ 
+ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureKey key) {
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_texture_create);
++  gpu_frame_stats().texture_creates.fetch_add(1, std::memory_order_relaxed);
+   D3D12_RESOURCE_DESC desc;
+   desc.Format = GetDXGIResourceFormat(key);
+   if (desc.Format == DXGI_FORMAT_UNKNOWN) {
+@@ -1559,6 +1562,8 @@
+ 
+ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                               bool load_mips) {
++  GpuStatsTimer stats_timer(gpu_frame_stats().ns_texture_load);
++  gpu_frame_stats().texture_loads.fetch_add(1, std::memory_order_relaxed);
+   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+   TextureKey texture_key = d3d12_texture.key();
+ 
