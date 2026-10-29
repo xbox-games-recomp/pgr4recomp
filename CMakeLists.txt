@@ -25,3 +25,9 @@ else()
 endif()
 
 rexglue_setup_target(pgr4recomp)
+
+# User graphics settings, loaded by the SDK from <exe dir>/pgr4recomp.toml. Copied once so local edits survive rebuilds.
+add_custom_command(TARGET pgr4recomp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/config/pgr4recomp.toml
+            -DDST=$<TARGET_FILE_DIR:pgr4recomp>/pgr4recomp.toml
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/copy_if_missing.cmake)

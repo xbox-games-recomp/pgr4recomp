@@ -1,0 +1,16 @@
+# pgr4recomp graphics settings. Copied next to pgr4recomp.exe by the build if not already there;
+# edit the copy in out\build\win-amd64-release. Command-line flags (e.g. --resolution_scale=2) override it.
+
+# 60 fps: present every vblank instead of the game's 30 fps lock. Gameplay runs in real time either way.
+pgr4_60fps = true
+
+# Anti-aliasing / image quality.
+# resolution_scale: internal render scale (1 = the game's own resolution, 2 = 4x supersampling, 3 = 9x).
+#   The game's own EDRAM MSAA stays on at every scale. 2 holds 55-60 fps in races on an RTX 4080 SUPER.
+resolution_scale = 1
+# swap_post_effect: post-process AA on the final image: "none", "fxaa", "fxaa_extreme".
+swap_post_effect = "fxaa"
+# present_effect: scaling to the window: "bilinear", "cas" (sharpen), "fsr" (FSR 1 upscale + sharpen).
+present_effect = "bilinear"
+# anisotropic_override: -1 game default, 0 off, 1..5 = 1x/2x/4x/8x/16x.
+anisotropic_override = 5
