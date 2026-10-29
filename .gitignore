@@ -5,3 +5,7 @@ build/
 generated/default/
 CMakeUserPresets.json
 __pycache__/
+
+# Launcher: per-user choices, and the copy built into the repository root
+launcher.user.ini
+/pgr4_launcher.exe
