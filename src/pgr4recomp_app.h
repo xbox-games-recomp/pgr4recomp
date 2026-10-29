@@ -31,6 +31,12 @@ class Pgr4recompApp : public rex::ReXApp {
     if (rex::cvar::GetFlagSource("render_target_path_d3d12") == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName("render_target_path_d3d12", "rov");
     }
+    // The SDK drops every CPU-uploaded shared-memory page at each frame end, re-uploading all geometry,
+    // textures and constants every frame; write watches already catch CPU writes (upstream Xenia relies
+    // on them alone). Off: races go from ~38 to ~60 fps with no visible difference (NOTES 11).
+    if (rex::cvar::GetFlagSource("clear_memory_page_state") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("clear_memory_page_state", "false");
+    }
     config.input_factory = pgr4::ScriptedInputDriver::CreateInputSystem;  // == SDK default unless PGR4_PAD set
   }
 
