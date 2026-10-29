@@ -197,3 +197,40 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
   without `-I` (PIL is in user site-packages); the PowerShell `python` lacks PIL entirely.
 - One bench with `--resolution_scale=2` stopped presenting right after the front-end car loaded; a rerun was
   fine (title 52 fps, race 30-35 fps before the page-state fix; after it 55-59 fps at 2x). Watch for it.
+
+## 12. Sky wedges: broken crowd skeletons, culled (2026-10-28/29)
+
+User recording: grey wedges flickering out of the Alexander Column top at the St Petersburg start line
+(orange at night in Shanghai). `scripts/sky_bench.ps1` reproduces it. Wedges come in bursts (about one
+frame every ~20 s at the start line), so verdicts need 180+ snapshot runs; several earlier 0/60 results
+were luck.
+Tooling: SDK draw-debug hook (`patches/rexglue-draw-debug.patch`), active only with
+`REX_DRAW_DEBUG_FILE=<file>`, re-read live (keys documented above `DrawDebugSkip`: log, skip_vs/ps/vf,
+dump, watch, force_upload, trace_vf, late_writes, skip_sentinel, detect, skip_spread, interp, interp_vf,
+jumps). `scripts/skip_probe.py` writes the file and counts wedge frames on a running game (and
+`<tag>_times.txt` for log correlation); `bisect_vs.sh` / `bisect_vf.sh` bisect by shader / vertex buffer.
+After an SDK rebuild copy `rexgpu-xenos.dll`/`rexruntime.dll` into `outuild\win-amd64-release` by hand.
+
+Cause: crowd members. VS 72EE8062BF5E764A (skinned/instanced world shader) skips -> 0/180 (control 12/180);
+long-run bisection by vertex buffer -> crowd mesh 0AC5F06C (78 verts, 7 bones: hands 4/5, elbows 7/8,
+feet 11/14) -> 0/180. Per instance: local vertex = index mod c55.y, bone = vertex byte (vf95 dword 5 .x) +
+c[55+a0].x into the vf94 palette (3 x half4 rows, 8in32, double-buffered 0x0A73A8B0 / 0x0A70462C).
+The palette bones of every crowd member are hundreds/thousands of units apart (a person spans view depths
+-291..+1782 in the SDK's CPU shader interpreter), so the grandstands look empty and the crowd triangles
+cross the camera plane; when one clips into the sky it is a wedge. The data is the game's own (the
+interpreter on the same registers/memory agrees), i.e. most likely a recompiled-CPU bug in the crowd
+animation / skinning-matrix code. NOT FIXED at the source.
+Workaround (in `patches/rexglue-draw-debug.patch`, command_processor.cpp): SDK cvar `pgr4_crowd_cull` (+ `pgr4_crowd_cull_spread`,
+50 units) skips 72EE draws where an instance's live bones are > spread from the skeleton median; PGR4 turns
+it on in `OnPreSetup`. 0 wedges in 180 + 76 static-frame runs, image diff vs. unskipped = edge noise only,
+race 58.6 fps.
+Also hidden crowd props/members (patch `rexglue-x360-half-vertex-kill.patch`): the game writes float16 0x7FFF/0xFFFF (NaN) bone translations to hide
+them. SDK cvar `x360_half_vertex_kill` (PGR4: on) flags vertices whose 16-bit float fetch has exponent 31
+(integer test on the fetched bits; a NaN test on the final position was optimized out by the driver) and
+moves them outside the clip volume. Decoding those halves as Xbox 360 extended range instead makes giant
+triangles, so GPU fetch stays IEEE.
+Ruled out on the way: page invalidation/upload staleness, CPU writing bones after the CP read them,
+occlusion queries, index-conversion cache, primitive restart, async pipelines, ROV vs RTV.
+Codegen fix kept (`rexglue-vpkd3d-float16-range.patch`): vpkd3d128 FLOAT16_2/4 saturated at 65504; Xbox 360
+half has no Inf/NaN, max 131008 (the codegen's own vupkd3d128 already decodes it that way).
+Next: find the CPU code that fills the crowd palette and diff it against Xenia Canary (original PPC code).
