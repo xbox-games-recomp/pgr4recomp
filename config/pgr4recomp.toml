@@ -3,6 +3,9 @@
 
 # 60 fps: present every vblank instead of the game's 30 fps lock. Gameplay runs in real time either way.
 pgr4_60fps = true
+# Adaptive vsync (with pgr4_60fps): present at once and pace to 60 fps on the host, so a frame that
+# misses the vblank by a little shows at ~17 ms instead of 33 ms. false = wait for the vblank.
+pgr4_adaptive_vsync = true
 
 # Anti-aliasing / image quality.
 # resolution_scale: internal render scale (1 = the game's own resolution, 2 = 4x supersampling, 3 = 9x).
