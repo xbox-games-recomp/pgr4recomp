@@ -15,6 +15,7 @@ set(PGR4RECOMP_SOURCES
     src/main.cpp
     src/import_trace.cpp
     src/xam_fixes.cpp
+    src/game_patches.cpp
 )
 
 if(WIN32)

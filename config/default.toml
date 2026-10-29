@@ -17,3 +17,11 @@
 0x82746C84 = { parent = 0x82746820, end = 0x82746CA4 }
 0x827561B4 = { end = 0x82756214 }
 0x82756214 = { parent = 0x82755DB0, end = 0x82756234 }
+
+# D3D swap: `lwz r10,0x350C(r31)` loads the device's PresentationInterval (PGR4 uses 2 = 30 fps).
+# The hook may replace it with 1 (60 fps); see src/game_patches.cpp.
+[[midasm_hook]]
+address = 0x826957EC
+name = "Pgr4PresentIntervalHook"
+registers = ["r10"]
+after_instruction = true
