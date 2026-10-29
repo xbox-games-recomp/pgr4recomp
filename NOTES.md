@@ -115,3 +115,24 @@ game's Lua 5.1 uses setjmp or C++ throw before relying on Lua error paths.
 
 clang 23.1.3 (`C:\Program Files\LLVM\bin`), CMake (`C:\Program Files\CMake\bin`, not on PATH), Python 3.10.
 Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground truth).
+
+## 9. Saves, title-server crash, front-end black screen (2026-10-28, later)
+
+- **Saving works.** The SDK's user data root is `<Documents>\pgr4recomp` (here `D:\Documents\pgr4recomp`):
+  `B13EBABEBABEBABE\4D5307F9\00000001\pgr4.save\{savegame,buffer.save}` + `Headers\...`, written after a race.
+  The `SAVE:\buffer.save` miss in the log is the first-run probe only. Delete that folder to test a fresh profile.
+- With a save present, boots crashed on most runs (`Unhandled guest access violation ... 0x70510008`) right after
+  the front end. Cause: `XamCreateEnumeratorHandle` is an SDK stub returning ERROR_INVALID_PARAMETER; the online
+  worker 0x82774C00 (XTitleServerCreateEnumerator wrapper 0x828FE270, app 0xFC, msg 0x58039, 212 extra bytes)
+  treats the result as an HRESULT, enumerates INVALID_HANDLE_VALUE and `CloseHandle(-1)`s. Fixed in
+  `src/xam_fixes.cpp` with a real empty enumerator (strong `__imp__` override in the exe, no SDK fork); 3/3 boots OK.
+- `src/import_trace.cpp` (`$env:PGR4_TRACE_IMPORTS=1`): logs selected XAM calls with args, result and guest return
+  addresses (lr + back-chain), plus every 30th `VdSwap` with the frontbuffer fetch constant.
+- `scripts/boot_steps.ps1 <tag> 'START,A,WAIT,...' <delay> [cvars]`: one press per step, snapshot after each.
+- **The boot "black screens" are not system UI.** No XamShow* call happens on them (the only one, a headless
+  XamShowDeviceSelectorUI, comes later). Sequence with a save: intro -> (START) white fade -> title "PRESS START
+  TO CONTINUE" (renders) -> (A) front end loads `frontend_mad.bpr` + Ferrari Enzo showroom car -> **black**, 30 s+,
+  still takes input -> (A) race loads. VdSwap keeps running at 30 fps with the same frontbuffer, so the game is
+  presenting frames that come out black (not a stall). `--readback_resolve=some` does not change it. The SDK has
+  no cvar to pick the Vulkan backend (`any` = D3D12 first). Next: Xenia ground truth for this screen (needs a pad
+  or a focused window for keyboard input), then GPU-side inspection of what the front end draws.

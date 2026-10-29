@@ -1,7 +1,7 @@
 // Import tracer: logs guest calls to selected XAM exports (args r3..r8 and the r3 result) when
 // PGR4_TRACE_IMPORTS is set. Each wrapper is a strong definition of the `__imp__X` symbol the generated
 // code calls, so the linker binds the game to it instead of the rexruntime.dll export; the original
-// is fetched from the DLL by name. Each import logs its first 40 calls only.
+// is fetched from the DLL by name. Each import logs its first 40 calls only (VdSwap: every 30th).
 
 #include <atomic>
 #include <cstdlib>
@@ -84,3 +84,18 @@ PGR4_TRACE_IMPORT(XamNotifyCreateListener)
 PGR4_TRACE_IMPORT(XNotifyGetNext)
 PGR4_TRACE_IMPORT(XamUserCreateAchievementEnumerator)
 PGR4_TRACE_IMPORT(XamUserCreateStatsEnumerator)
+
+// VdSwap: every 30th present, log the count and the frontbuffer texture fetch constant (6 dwords),
+// to tell "not presenting" apart from "presenting a black frontbuffer".
+extern "C" void __imp__VdSwap(PPCContext& __restrict ctx, uint8_t* base) {
+  static const GuestFn original = ResolveOriginal("__imp__VdSwap");
+  static std::atomic<uint32_t> count{0};
+  const uint32_t n = count.fetch_add(1);
+  if (TraceEnabled() && n % 30 == 0) {
+    const auto* f = reinterpret_cast<const uint32_t*>(base + ctx.r4.u32);
+    REXKRNL_INFO("TRACE VdSwap #{} fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", n,
+                 __builtin_bswap32(f[0]), __builtin_bswap32(f[1]), __builtin_bswap32(f[2]),
+                 __builtin_bswap32(f[3]), __builtin_bswap32(f[4]), __builtin_bswap32(f[5]));
+  }
+  original(ctx, base);
+}
