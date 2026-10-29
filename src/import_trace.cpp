@@ -4,6 +4,7 @@
 // is fetched from the DLL by name. Each import logs its first 40 calls only (VdSwap: every 30th).
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 
@@ -91,6 +92,13 @@ extern "C" void __imp__VdSwap(PPCContext& __restrict ctx, uint8_t* base) {
   static const GuestFn original = ResolveOriginal("__imp__VdSwap");
   static std::atomic<uint32_t> count{0};
   const uint32_t n = count.fetch_add(1);
+  // Guest present rate, always logged every 150 swaps (cheap; the SDK's perf CSV is not wired up).
+  static auto last = std::chrono::steady_clock::now();
+  if (n % 150 == 0) {
+    const auto now = std::chrono::steady_clock::now();
+    if (n) REXKRNL_INFO("PGR4 fps {:.1f} (swap #{})", 150.0 / std::chrono::duration<double>(now - last).count(), n);
+    last = now;
+  }
   if (TraceEnabled() && n % 30 == 0) {
     const auto* f = reinterpret_cast<const uint32_t*>(base + ctx.r4.u32);
     REXKRNL_INFO("TRACE VdSwap #{} fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", n,
