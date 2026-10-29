@@ -1,0 +1,32 @@
+diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
+index cbdd7f7..1fd03de 100644
+--- a/src/codegen/builders/vector.cpp
++++ b/src/codegen/builders/vector.cpp
+@@ -1288,7 +1288,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
+         ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
+                     srcIdx);
+         ctx.println(
+-            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
++            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 131008.0f) ? 0xFF : "
+             "(({2}.u32[{3}]&0x7f800000)>>23);",
+             ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+         ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
+@@ -1327,6 +1327,9 @@ bool build_vpkd3d128(BuilderContext& ctx) {
+       // Pack 4 elements into 64 bits (4 x 16-bit floats)
+       // Guest element 0 goes to highest 16-bit position, element 3 to lowest
+       // Output u16 index = (3-i) + 2*shift for element i
++      // Xbox 360 float16 has no Inf/NaN: exponent 31 is a normal exponent and the largest value
++      // is 131008 (as in the Xbox 360 XMConvertFloatToHalf), so only larger values saturate to
++      // 0x7FFF (also in FLOAT16_2 above). Saturating at 65504 broke PGR4's crowd bone matrices.
+       if (ctx.insn.operands[3] != 2 || ctx.insn.operands[4] > 2)
+         REXCODEGEN_WARN("Unexpected float16_4 pack instruction at {:X}", ctx.base);
+ 
+@@ -1336,7 +1339,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
+         ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
+                     srcIdx);
+         ctx.println(
+-            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
++            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 131008.0f) ? 0xFF : "
+             "(({2}.u32[{3}]&0x7f800000)>>23);",
+             ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+         ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
