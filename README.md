@@ -161,20 +161,18 @@ configure time): copy `rexgpu-xenos.dll` and `rexruntime.dll` from the SDK's `ou
 
 ## Running
 
-Plug in the gamepad first, then double-click `play.bat`, or from the repository root:
+Plug in the gamepad first, then double-click `pgr4_launcher.exe` in the repository root (the build puts it
+there and next to the game). It is a settings window — window size, fullscreen, 60 fps, resolution scale,
+AA, anisotropic filtering, log level — that passes your choices as cvars (overriding `pgr4recomp.toml`) and
+saves them to `launcher.user.ini`. The options are in `launcher.ini`; the launcher itself is the `launcher/`
+submodule ([recomp-launcher](https://github.com/taxidriverhk/recomp-launcher)). `pgr4_launcher.exe --play`
+starts the game straight away with the saved settings.
 
-```bat
-play.bat
-```
+By default it starts `out\build\win-amd64-release\pgr4recomp.exe` in a 1280×720 window with `assets` as the
+game root and writes the log to `work\play.log`. Any other cvar goes in the launcher's *Extra arguments* box,
+or after `--`: `pgr4_launcher.exe --play -- --vsync=false`.
 
-It starts `out\build\win-amd64-release\pgr4recomp.exe` in a 1280×720 window with `assets` as the game root
-and writes the log to `work\play.log`. Other window sizes, or any other cvar, go on the command line:
-
-```bat
-play.bat --window_width=1920 --window_height=1080
-```
-
-Always pass `--fullscreen=false` (as `play.bat` and `scripts\run.ps1` do) when starting the exe yourself: the
+Always pass `--fullscreen=false` (as the launcher and `scripts\run.ps1` do) when starting the exe yourself: the
 SDK's `fullscreen` cvar defaults to true. Passing the same cvar twice makes the exe exit at startup with no
 log.
 
@@ -332,7 +330,7 @@ After changing SDK files, regenerate the matching patch with `git -C ..\_ext\rex
 | `config/pgr4recomp.toml` | Default user settings, copied next to the exe on the first build |
 | `src/` | Game layer: app, hooks, XAM fix, frame stats, import trace, scripted pad |
 | `patches/rexglue-*.patch` | This port's changes to the SDK |
-| `play.bat` | Play in a window |
+| `launcher.ini`, `launcher/` | Launcher settings, and the launcher itself (submodule); builds `pgr4_launcher.exe` |
 | `scripts/build_sdk.bat`, `scripts/build.bat` | Build + install the SDK; configure + build the game |
 | `scripts/run.ps1`, `scripts/snap.ps1` | Test launch (960×540 window, log in `work\<tag>.log`); window snapshot that works while covered |
 | `scripts/boot_steps.ps1`, `goto_race.ps1`, `race_probe.ps1`, `bench.ps1`, `autopilot.py` | Scripted runs: menu stepping, getting to a race, benchmarks, a minimap-following autopilot |
