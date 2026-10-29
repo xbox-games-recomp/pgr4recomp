@@ -8,6 +8,7 @@
 #include <rex/rex_app.h>
 #include <rex/system/gpu_plugin.h>
 
+#include "frame_stats.h"
 #include "scripted_input.h"
 
 class Pgr4recompApp : public rex::ReXApp {
@@ -50,6 +51,21 @@ class Pgr4recompApp : public rex::ReXApp {
     config.input_factory = pgr4::ScriptedInputDriver::CreateInputSystem;  // == SDK default unless PGR4_PAD set
   }
 
+  // The window exists by now (UI thread). Frame stats post "N fps, D draws, T tris" once a second
+  // from the guest render thread; the title is set back on the UI thread.
+  void OnPostLaunchModule(rex::system::XThread* thread) override {
+    (void)thread;
+    if (!window()) return;
+    base_title_ = window()->GetTitle();
+    pgr4::SetTitleSink([this](const std::string& stats) {
+      app_context().CallInUIThreadDeferred([this, title = base_title_ + " - " + stats] {
+        if (window()) window()->SetTitle(title);
+      });
+    });
+  }
+
+  void OnShutdown() override { pgr4::SetTitleSink(nullptr); }
+
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
@@ -59,6 +75,8 @@ class Pgr4recompApp : public rex::ReXApp {
   // std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override;
   // std::unique_ptr<rex::ui::AchievementNotificationDialog>
   // CreateAchievementNotificationDialog() override;
-  // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
+
+ private:
+  std::string base_title_;
 };

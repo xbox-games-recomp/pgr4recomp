@@ -13,6 +13,8 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "frame_stats.h"
+
 namespace {
 
 using GuestFn = void (*)(PPCContext&, uint8_t*);
@@ -105,5 +107,6 @@ extern "C" void __imp__VdSwap(PPCContext& __restrict ctx, uint8_t* base) {
                  __builtin_bswap32(f[0]), __builtin_bswap32(f[1]), __builtin_bswap32(f[2]),
                  __builtin_bswap32(f[3]), __builtin_bswap32(f[4]), __builtin_bswap32(f[5]));
   }
+  pgr4::OnSwapBegin();
   original(ctx, base);
 }
