@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <rex/cvar.h>
 #include <rex/rex_app.h>
+#include <rex/system/gpu_plugin.h>
 
 #include "scripted_input.h"
 
@@ -19,8 +21,16 @@ class Pgr4recompApp : public rex::ReXApp {
   }
 
   // The SDK's gpu_plugin cvar defaults to "" (no GPU emulation); PGR4 needs the Xenos backend.
+  // The plugin is loaded here rather than by the SDK right after this hook so that its cvars are
+  // registered and can be given PGR4 defaults (command line / config values still win).
   void OnPreSetup(rex::RuntimeConfig& config) override {
     if (config.gpu_plugin.empty()) config.gpu_plugin = "xenos";
+    config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);  // null -> SDK retries, reports
+    // The host render target path (RTV, the D3D12 default) turns the front end after the title
+    // black; the EDRAM-accurate ROV path renders it (NOTES 10).
+    if (rex::cvar::GetFlagSource("render_target_path_d3d12") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("render_target_path_d3d12", "rov");
+    }
     config.input_factory = pgr4::ScriptedInputDriver::CreateInputSystem;  // == SDK default unless PGR4_PAD set
   }
 
