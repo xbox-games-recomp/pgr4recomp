@@ -1,0 +1,179 @@
+diff --git a/include/rex/graphics/d3d12/texture_cache.h b/include/rex/graphics/d3d12/texture_cache.h
+--- a/include/rex/graphics/d3d12/texture_cache.h
++++ b/include/rex/graphics/d3d12/texture_cache.h
+@@ -268,8 +268,18 @@
+       srv_descriptors_.emplace(descriptor_key, descriptor_index);
+     }
+ 
++    // The resource is placed in texture_heaps_[heap_index], pages freed on destruction.
++    void SetHeapPlacement(uint32_t heap_index, uint32_t first_page, uint32_t page_count) {
++      heap_index_ = heap_index;
++      heap_first_page_ = first_page;
++      heap_page_count_ = page_count;
++    }
++
+    private:
+     Microsoft::WRL::ComPtr<ID3D12Resource> resource_;
++    uint32_t heap_index_ = UINT32_MAX;
++    uint32_t heap_first_page_ = 0;
++    uint32_t heap_page_count_ = 0;
+     D3D12_RESOURCE_STATES resource_state_;
+     std::unique_ptr<D3D12Texture> texture_3d_as_2d_;
+ 
+@@ -525,6 +535,21 @@
+   static_assert(kScaledResolveHeapSizeLog2 <= 30,
+                 "Scaled resolve heaps are assumed to only be wholly mappable to up to "
+                 "two 2 GB buffers");
++  // Texture memory pool (d3d12_texture_heap_pool): textures are placed resources sub-allocated
++  // from shared heaps in 64 KB pages, first fit, instead of committed resources, which each get
++  // their own heap and cost ~0.25 ms to create - streamed-in textures made frames hitch.
++  static constexpr uint32_t kTextureHeapPageSizeLog2 = 16;
++  static constexpr uint32_t kTextureHeapPages = 1024;  // 64 MB heaps
++  struct TextureHeap {
++    Microsoft::WRL::ComPtr<ID3D12Heap> heap;
++    uint64_t used[kTextureHeapPages / 64] = {};
++    uint32_t free_pages = kTextureHeapPages;
++  };
++  std::vector<std::unique_ptr<TextureHeap>> texture_heaps_;
++  bool AllocateTexturePages(uint32_t page_count, uint32_t& heap_index_out,
++                            uint32_t& first_page_out);
++  void FreeTexturePages(uint32_t heap_index, uint32_t first_page, uint32_t page_count);
++
+   // Resident portions of the tiled buffer.
+   std::vector<Microsoft::WRL::ComPtr<ID3D12Heap>> scaled_resolve_heaps_;
+   // Number of currently resident portions of the tiled buffer, for profiling.
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -18,6 +18,7 @@
+ #include <utility>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/d3d12/command_processor.h>
+ #include <rex/graphics/d3d12/shared_memory.h>
+@@ -33,6 +34,11 @@
+ #include <rex/ui/d3d12/d3d12_upload_buffer_pool.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
+ 
++REXCVAR_DEFINE_BOOL(d3d12_texture_heap_pool, true, "GPU/D3D12",
++                    "Place textures in pooled 64 MB heaps instead of a committed resource (own "
++                    "heap) each; creating committed resources caused hitches when textures stream "
++                    "in");
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1428,6 +1434,70 @@
+   for (const auto& descriptor_pair : srv_descriptors_) {
+     d3d12_texture_cache.ReleaseTextureDescriptor(descriptor_pair.second);
+   }
++  if (heap_index_ != UINT32_MAX) {
++    // Textures are only destroyed once the GPU is done with them, so the pages can be reused now.
++    resource_.Reset();
++    d3d12_texture_cache.FreeTexturePages(heap_index_, heap_first_page_, heap_page_count_);
++  }
++}
++
++bool D3D12TextureCache::AllocateTexturePages(uint32_t page_count, uint32_t& heap_index_out,
++                                             uint32_t& first_page_out) {
++  if (!page_count || page_count > kTextureHeapPages) {
++    return false;
++  }
++  for (size_t i = 0; i <= texture_heaps_.size(); ++i) {
++    if (i == texture_heaps_.size()) {
++      auto new_heap = std::make_unique<TextureHeap>();
++      const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
++      D3D12_HEAP_DESC heap_desc = {};
++      heap_desc.SizeInBytes = uint64_t(kTextureHeapPages) << kTextureHeapPageSizeLog2;
++      heap_desc.Properties = ui::d3d12::util::kHeapPropertiesDefault;
++      heap_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++      heap_desc.Flags =
++          D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES | provider.GetHeapFlagCreateNotZeroed();
++      if (FAILED(provider.GetDevice()->CreateHeap(&heap_desc, IID_PPV_ARGS(&new_heap->heap)))) {
++        return false;
++      }
++      texture_heaps_.push_back(std::move(new_heap));
++    }
++    TextureHeap& heap = *texture_heaps_[i];
++    if (heap.free_pages < page_count) {
++      continue;
++    }
++    uint32_t run = 0;
++    for (uint32_t page = 0; page < kTextureHeapPages; ++page) {
++      if (!(page & 63) && heap.used[page >> 6] == ~uint64_t(0)) {
++        run = 0;
++        page += 63;
++        continue;
++      }
++      if ((heap.used[page >> 6] >> (page & 63)) & 1) {
++        run = 0;
++        continue;
++      }
++      if (++run == page_count) {
++        uint32_t first = page + 1 - page_count;
++        for (uint32_t p = first; p <= page; ++p) {
++          heap.used[p >> 6] |= uint64_t(1) << (p & 63);
++        }
++        heap.free_pages -= page_count;
++        heap_index_out = uint32_t(i);
++        first_page_out = first;
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++void D3D12TextureCache::FreeTexturePages(uint32_t heap_index, uint32_t first_page,
++                                         uint32_t page_count) {
++  TextureHeap& heap = *texture_heaps_[heap_index];
++  for (uint32_t p = first_page; p < first_page + page_count; ++p) {
++    heap.used[p >> 6] &= ~(uint64_t(1) << (p & 63));
++  }
++  heap.free_pages += page_count;
+ }
+ 
+ bool D3D12TextureCache::IsDecompressionNeeded(xenos::TextureFormat format, uint32_t width,
+@@ -1552,12 +1622,38 @@
+   // Assuming untiling will be the next operation.
+   D3D12_RESOURCE_STATES resource_state = D3D12_RESOURCE_STATE_COPY_DEST;
+   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+-  if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesDefault,
++  uint32_t heap_index = UINT32_MAX, first_page = 0, page_count = 0;
++  if (REXCVAR_GET(d3d12_texture_heap_pool)) {
++    // Large textures (over a quarter of a heap) stay committed to limit fragmentation.
++    D3D12_RESOURCE_ALLOCATION_INFO allocation_info =
++        device->GetResourceAllocationInfo(0, 1, &desc);
++    if (allocation_info.Alignment <= (UINT64_C(1) << kTextureHeapPageSizeLog2) &&
++        allocation_info.SizeInBytes <=
++            (uint64_t(kTextureHeapPages / 4) << kTextureHeapPageSizeLog2)) {
++      page_count = uint32_t((allocation_info.SizeInBytes +
++                             ((UINT64_C(1) << kTextureHeapPageSizeLog2) - 1)) >>
++                            kTextureHeapPageSizeLog2);
++      if (AllocateTexturePages(page_count, heap_index, first_page) &&
++          FAILED(device->CreatePlacedResource(
++              texture_heaps_[heap_index]->heap.Get(),
++              uint64_t(first_page) << kTextureHeapPageSizeLog2, &desc, resource_state, nullptr,
++              IID_PPV_ARGS(&resource)))) {
++        FreeTexturePages(heap_index, first_page, page_count);
++        heap_index = UINT32_MAX;
++      }
++    }
++  }
++  if (!resource &&
++      FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesDefault,
+                                              provider.GetHeapFlagCreateNotZeroed(), &desc,
+                                              resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+     return nullptr;
+   }
+-  return std::unique_ptr<Texture>(new D3D12Texture(*this, key, resource.Get(), resource_state));
++  auto texture = std::make_unique<D3D12Texture>(*this, key, resource.Get(), resource_state);
++  if (heap_index != UINT32_MAX) {
++    texture->SetHeapPlacement(heap_index, first_page, page_count);
++  }
++  return texture;
+ }
+ 
+ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
