@@ -5,7 +5,10 @@ $root = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $root 'out\build\win-amd64-release\pgr4recomp.exe'
 $log = Join-Path $root "work\$Tag.log"
 Remove-Item $log -ErrorAction SilentlyContinue
-$cvars = @("--game_data_root=`"$(Join-Path $root 'assets')`"", "--log_file=`"$log`"", '--log_level=info',
-           '--fullscreen=false', '--window_width=960', '--window_height=540') + @($Extra | Where-Object { $_ })
+$Extra = @($Extra | Where-Object { $_ })
+# Repeating a cvar makes the SDK exit at startup, so an explicit --log_level replaces the default.
+$level = if ($Extra -match '^--log_level=') { @() } else { @('--log_level=info') }
+$cvars = @("--game_data_root=`"$(Join-Path $root 'assets')`"", "--log_file=`"$log`"") + $level +
+         @('--fullscreen=false', '--window_width=960', '--window_height=540') + $Extra
 $p = Start-Process -FilePath $exe -ArgumentList $cvars -WorkingDirectory (Split-Path $exe) -PassThru
 "pid=$($p.Id) log=$log"
