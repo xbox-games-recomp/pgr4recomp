@@ -209,7 +209,7 @@ Tooling: SDK draw-debug hook (`patches/rexglue-draw-debug.patch`), active only w
 dump, watch, force_upload, trace_vf, late_writes, skip_sentinel, detect, skip_spread, interp, interp_vf,
 jumps). `scripts/skip_probe.py` writes the file and counts wedge frames on a running game (and
 `<tag>_times.txt` for log correlation); `bisect_vs.sh` / `bisect_vf.sh` bisect by shader / vertex buffer.
-After an SDK rebuild copy `rexgpu-xenos.dll`/`rexruntime.dll` into `outuild\win-amd64-release` by hand.
+After an SDK rebuild copy `rexgpu-xenos.dll`/`rexruntime.dll` into `out\build\win-amd64-release` by hand.
 
 Cause: crowd members. VS 72EE8062BF5E764A (skinned/instanced world shader) skips -> 0/180 (control 12/180);
 long-run bisection by vertex buffer -> crowd mesh 0AC5F06C (78 verts, 7 bones: hands 4/5, elbows 7/8,
@@ -234,3 +234,78 @@ occlusion queries, index-conversion cache, primitive restart, async pipelines, R
 Codegen fix kept (`rexglue-vpkd3d-float16-range.patch`): vpkd3d128 FLOAT16_2/4 saturated at 65504; Xbox 360
 half has no Inf/NaN, max 131008 (the codegen's own vupkd3d128 already decodes it that way).
 Next: find the CPU code that fills the crowd palette and diff it against Xenia Canary (original PPC code).
+
+## 13. Window title stats, turn hitches diagnosed and fixed (2026-10-29)
+
+**Window title.** `pgr4recomp [<sdk build>] - 60 fps, 6258 draws, 3525k tris`, updated once a second
+(per-frame averages over that second; cvar `pgr4_title_stats`). Frames are counted at the guest VdSwap
+(`src/import_trace.cpp` -> `src/frame_stats.cpp`), draws/triangles in the GPU command processor
+(triangles from the guest primitive type + index count: list n/3, strip/fan n-2, rect list n/3*2, quad
+list n/4*2; PGR4 draws ~1-4M per frame, shadow and reflection passes included). The app sets the title on
+the UI thread (`OnPostLaunchModule` registers a sink that posts `CallInUIThreadDeferred`). Note
+`scripts/autopilot.py` finds the window by the `pgr4recomp [` title prefix, which still matches.
+
+**Instrumentation** (SDK `patches/rexglue-gpu-frame-stats.patch`): `include/rex/graphics/gpu_frame_stats.h`,
+cumulative atomics exported from rexgpu-xenos.dll as `rex_gpu_frame_stats()` (the exe gets it with
+GetProcAddress; a `size` field guards against a stale DLL). Counts: swaps, draws, triangles, copies,
+pipelines, shader translations, texture creates/loads, upload bytes, write-watch invalidations,
+WAIT_REG_MEM sleeps. Times (command processor thread unless noted): idle (no commands), IssueDraw
+(with pipeline / textures (create, load) / copies inside), uploads, host fence waits, IssueSwap,
+WAIT_REG_MEM, invalidation callbacks (guest threads). The exe adds guest render-thread time: the D3D fence
+spin-wait `sub_82697970` is overridden and timed, on-CPU time from QueryThreadCycleTime.
+Log (cvar `pgr4_hitch_ms`, default 25, 0 = off): `PGR4 frames:` once a second (fps, worst frame, per-frame
+averages) and `PGR4 hitch swap #N:` for every frame over the threshold with the full breakdown.
+`scripts/hitch_stats.py <log> [skip] [secs]` summarises a race (starts at the first second with >= 2000
+draws/frame). Repro used throughout: `boot_steps` to St Petersburg, 20 s, then `autopilot.py 120 0.7`;
+stats over race seconds 25-115.
+
+**Diagnosis.** Two kinds of race hitch, neither guest CPU work (guest work ~9-10 ms of 16.7 on average;
+write-watch faults ~10/frame, 0.01 ms; no pipeline/shader compiles in races; host GPU fence waits 0):
+1. *Missed vblank on dense views (most of them; "when the car turns").* Turning toward the palace /
+   grandstands raises draws from ~4-5k to 7-9k per frame. The command processor costs ~1.3 us per draw in
+   IssueDraw plus packet processing (profile: UpdateBindings, WriteRegister, driver, many small items -
+   the generic Xenia-derived path), so it needs ~16.4 ms (median over hitch frames) against the 16.7 ms
+   vblank. The guest swap waits for the (emulated 60 Hz) vblank via WAIT_REG_MEM, so a 0.5 ms overrun
+   becomes a 33 ms frame (`guest fence wait ~16 | wait_reg_mem ~16 | draw 10-17`). Spinning instead of
+   Sleep in WAIT_REG_MEM changed nothing: those waits are the vblank itself.
+2. *Texture creation bursts (fewer, larger).* PGR4 streams textures into new places, so new texture keys
+   keep appearing (~50/s while driving, 570 at the race start); each was a committed resource costing
+   0.26 ms in CreateCommittedResource (frames of 50-250 ms). Raising the texture cache limits 4x changed
+   nothing (not eviction).
+   Smaller: our own `pgr4_crowd_cull` rescanned every crowd draw's whole index + vertex buffer (3.5% of
+   the CP thread), and the *disabled* draw-debug hook still did a `call_once` 3x per draw (0.7%).
+
+**Fixes.**
+- `pgr4_adaptive_vsync` (default on, `src/game_patches.cpp`): with `pgr4_60fps`, the present-interval hook
+  passes D3DPRESENT_INTERVAL_IMMEDIATE (0x80000000 -> VdSwap interval 0, no vblank wait) and the VdSwap
+  override paces presents to a 60 Hz schedule (high-resolution waitable timer + spin; a late frame goes out
+  at once, at most one period of debt). Race clock vs wall clock unchanged (two HUD snapshots 10 s apart:
+  9.67 race-s in both modes).
+- `patches/rexglue-texture-heap-pool.patch`: textures are placed resources in pooled 64 MB heaps (64 KB
+  pages, first fit; textures over 16 MB stay committed), cvar `d3d12_texture_heap_pool` (default on).
+  Freed pages are reused at once (textures are only destroyed after their last GPU use completes).
+  0.26 -> 0.014 ms per texture; race-start burst creation 144 -> 9 ms.
+- `patches/rexglue-draw-debug.patch` updated: crowd-cull mesh scans cached per (index buffer, vertex
+  buffer) (only the bone palette is read per draw); draw-debug hooks return on a flag read at load.
+  IssueDraw 1.35 -> 1.31 us/draw.
+
+**Numbers** (90 s of autopilot racing each; "worst/s" = worst frame within each second):
+
+| run | mean fps | worst second | frames > 25 ms | worst/s median, p90 | dense seconds (>= 6500 draws): worst/s median | worst frame |
+|---|---|---|---|---|---|---|
+| before (3 runs) | 58.8-59.5 | 45-46 fps | 31-91 | 23-25, 36-37 ms | 31-32.5 ms | 218-248 ms |
+| SDK fixes, vblank pacing | 58.7 | 42 fps | 120 | 30, 36 ms | 20.9 ms | 85 ms |
+| SDK fixes + adaptive vsync (2 runs) | 60.0 | 55.7-56.8 fps | 1 | 16.7, 16.8 ms | 16.7-16.8 ms | 72-94 ms |
+
+| final build, another recomp using a core: vblank pacing | 54.6 | 26.7 fps | 467 | | | 101 ms |
+| same load: adaptive vsync (2 runs) | 58.9-59.9 | 46.6-54.8 fps | 2-66 | | | 67-104 ms |
+
+(Frame counts between vblank runs are noisy: the autopilot's route varies. Under CPU contention the
+command processor slows to ~2.5 us/draw and adaptive frames over budget show as 25-29 ms, not 33+.) The one remaining long frame
+per race is the race start (570 new textures, 72 MB uploaded, ~600 texture loads in one frame).
+With adaptive vsync the guest no longer spins on the fence (guest work ~6 ms) and the command processor
+idles 3-8 ms per frame. Profiling tip: build `rexgpu-xenos` as RelWithDebInfo (multi-config build dir,
+outputs `rexgpu-xenosrd.dll` + PDB, needs `rexruntimerd.dll`), sample the "GPU Commands" thread's RIP and
+symbolize with `llvm-symbolizer --obj=<dll>`.
+Left: the command processor's per-draw cost (headroom is ~2-3 ms at 9k draws; resolution_scale 2 or
+slower CPUs will hit it again), the race-start burst (uploads + untiling), and ~40 texture reloads per frame.
