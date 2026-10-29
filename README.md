@@ -1,5 +1,7 @@
 # Project Gotham Racing 4 — Static Recompilation
 
+![Racing in Macau](docs/macau_race.png)
+
 A native Windows (x64) port of the Xbox 360 *Project Gotham Racing 4* (Bizarre Creations / Microsoft, 2007),
 produced by **static recompilation**: every PowerPC function in the retail `default.xex` is translated to
 C++, compiled with Clang and linked against a replacement Xbox 360 kernel, XAM, audio, input and GPU runtime.
@@ -294,8 +296,8 @@ After changing SDK files, regenerate the matching patch with `git -C ..\_ext\rex
 **Works**
 
 - Boot, the Dolby logo and intro Bink movie (with sound), title screen, Gamer Profiles dialog, main menu,
-  Single Player / Arcade Mode, event cards
-- Full races (St Petersburg street race tested most, Shanghai at night too) with world, HUD, minimap, results
+  Single Player / Arcade Mode, event cards, Custom Match (city / route / lobby / car select)
+- Full races (St Petersburg street race tested most; Shanghai at night and Macau too) with world, HUD, minimap, results
   and end-of-race screens
 - 60 fps races; with adaptive vsync 90 s of racing shows a 60.0 fps mean and one frame over 25 ms
   (the race start, which creates ~570 textures at once)
@@ -338,6 +340,7 @@ After changing SDK files, regenerate the matching patch with `git -C ..\_ext\rex
 | `scripts/sky_bench.ps1`, `sky_probe.py`, `skip_probe.py`, `bisect_vs.sh`, `bisect_vf.sh` | Sky-wedge reproduction, detection and draw bisection |
 | `scripts/xexinfo.py`, `xexdec.py`, `pesect.py`, `xiso_extract.py` | XEX header dump, XEX → PE decryption, PE sections, XISO extraction |
 | `NOTES.md` | Engineering log |
+| `docs/` | README screenshot |
 | `generated/default/` | *(ignored)* generated C++ |
 | `out/` | *(ignored)* build tree |
 | `work/` | *(ignored)* logs, snapshots, PE image, pad command files |
