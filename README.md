@@ -77,26 +77,29 @@ building.
 
 ## First-time setup with the launcher
 
-The launcher can do everything in [Getting the source](#getting-the-source) (the SDK part),
-[Getting the game files](#getting-the-game-files) and [Building](#building) for you.
+The launcher does everything in [Getting the source](#getting-the-source) (the SDK part),
+[Getting the game files](#getting-the-game-files) and [Building](#building) for you:
 
-1. Download `pgr4recomp-<version>-windows.zip` from this repository's releases page and unzip it, preferably
-   to a short path such as `C:\Games`. The SDK is built next to the unzipped folder, in
-   `..\_ext\rexglue-sdk`. The zip holds the source and the launcher, and no game content.
-
-   (From a clone instead: `git submodule update --init launcher`, then build the launcher in a few seconds
-   with `cmake -S launcher -B launcher\build` and `cmake --build launcher\build --config Release`, and run
-   `launcher\build\Release\recomp_launcher.exe`.)
+1. Download `pgr4recomp-<version>-windows.zip` from this repository's releases page and unzip it to a short
+   path such as `C:\Games`. It holds the source and the launcher, and no game content.
 2. Run `pgr4_launcher.exe`. It opens on the **Setup** page.
-3. Choose your disc image (*Disc image…*, the full XGD2 dump) or the folder of an already extracted disc
-   (*Folder…*, linked as `assets\` with a directory junction), and press **Run setup**.
+3. Choose your disc image (*Disc image…*) or a folder with the extracted disc (*Folder…*), and press
+   **Run setup**. When it is done, press **Play**.
 
-It checks for Git, Visual Studio 2022 Community, LLVM and CMake in the folders the build scripts expect. If any
-are missing, it offers to install them with winget, which can take a while (Visual Studio especially). It
-puts the disc in `assets\` and checks `default.xex` against the SHA-1 below. It then runs
-`scripts\setup_sdk.ps1`, which clones the SDK into `..\_ext\rexglue-sdk`, replaces the symlink files,
-applies the patches and builds the SDK. Codegen and `scripts\build.bat` come last. A progress bar and the
-output show in the window, and the output also goes to `setup.log`. When it finishes, press **Play**.
+The step-by-step guide, shared by every game that uses the launcher, is
+**[First-time setup](https://github.com/taxidriverhk/recomp-launcher/blob/main/SETUP.md)** (also in
+`launcher\SETUP.md`). It covers choosing the game copy, installing the build tools, what each step does,
+troubleshooting, updating and running from a git clone.
+
+What is specific to Project Gotham Racing 4:
+
+| | |
+|---|---|
+| Game copy | The retail Xbox 360 disc as a full XGD2 dump, or its extracted game partition, with `default.xex` matching the SHA-1 in [Getting the game files](#getting-the-game-files). It goes into `assets\`. |
+| Build tools | Git, Visual Studio 2022 **Community** with the C++ workload, LLVM and CMake, in their default install folders (the build scripts expect them there). The launcher offers to install them with winget. |
+| Build | `scripts\setup_sdk.ps1` clones the ReXGlue SDK into `..\_ext\rexglue-sdk`, **next to** the game folder, then patches and builds it (the longest part). Codegen and `scripts\build.bat` follow. Later installations next to it reuse the SDK. |
+| Disk | About 7 GB for the extracted disc, plus the SDK and build trees. |
+| Rebuild | Setup skips codegen and the build once their output exists. After changing code, see [Building](#building). |
 
 A new release is built by pushing a `v*` tag (`.github/workflows/release.yml`).
 
