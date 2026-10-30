@@ -8,4 +8,5 @@ __pycache__/
 
 # Launcher: per-user choices, and the copy built into the repository root
 launcher.user.ini
+setup.log
 /pgr4_launcher.exe

@@ -25,6 +25,7 @@ See [Status](#status) for what works and what doesn't.
 ## Contents
 
 - [Requirements](#requirements)
+- [First-time setup with the launcher](#first-time-setup-with-the-launcher)
 - [Getting the game files](#getting-the-game-files)
 - [Building](#building)
 - [Running](#running)
@@ -73,6 +74,34 @@ git clone --recursive --branch v0.10.0 https://github.com/rexglue/rexglue-sdk.gi
 **Windows checkout gotcha:** git symlinks inside the SDK's submodules (libmspack `cabextract/mspack/*.c`,
 o1heap) arrive as one-line text files. Replace each mode-120000 entry with a copy of its target before
 building.
+
+## First-time setup with the launcher
+
+The launcher can do everything in [Getting the source](#getting-the-source) (the SDK part),
+[Getting the game files](#getting-the-game-files) and [Building](#building) for you. Install the
+[requirements](#requirements) and clone this repository, then:
+
+1. Get the launcher: download `recomp_launcher.exe` from the
+   [recomp-launcher releases](https://github.com/taxidriverhk/recomp-launcher/releases) into the repository
+   root, or build it from the submodule in a few seconds:
+
+   ```bat
+   git submodule update --init launcher
+   cmake -S launcher -B launcheruild
+   cmake --build launcheruild --config Release
+   ```
+
+   (The exe is `launcheruild\Releaseecomp_launcher.exe`.)
+2. Run it. It opens on the **Setup** page.
+3. Choose your disc image (*Disc image…*, the full XGD2 dump) or the folder of an already extracted disc
+   (*Folder…*, linked as `assets\` with a directory junction), and press **Run setup**.
+
+It checks for Git, Visual Studio 2022 Community, LLVM and CMake in the folders the build scripts expect. It
+puts the disc in `assets\` and checks `default.xex` against the SHA-1 below. It then runs
+`scripts\setup_sdk.ps1`, which clones the SDK into `..\_extexglue-sdk`, replaces the symlink files,
+applies the patches and builds the SDK. Codegen and `scriptsuild.bat` come last. Its output shows in the
+window and goes to `setup.log`. When it finishes, press **Play**. The build has also put `pgr4_launcher.exe`
+in the repository root; use that one from now on.
 
 ## Getting the game files
 
@@ -332,6 +361,7 @@ After changing SDK files, regenerate the matching patch with `git -C ..\_ext\rex
 | `patches/rexglue-*.patch` | This port's changes to the SDK |
 | `launcher.ini`, `launcher/` | Launcher settings, and the launcher itself (submodule); builds `pgr4_launcher.exe` |
 | `scripts/build_sdk.bat`, `scripts/build.bat` | Build + install the SDK; configure + build the game |
+| `scripts/setup_sdk.ps1` | Clone, fix up, patch and build the SDK in one go (the launcher's Setup page runs it) |
 | `scripts/run.ps1`, `scripts/snap.ps1` | Test launch (960×540 window, log in `work\<tag>.log`); window snapshot that works while covered |
 | `scripts/boot_steps.ps1`, `goto_race.ps1`, `race_probe.ps1`, `bench.ps1`, `autopilot.py` | Scripted runs: menu stepping, getting to a race, benchmarks, a minimap-following autopilot |
 | `scripts/hitch_stats.py`, `tsample.py` | Frame-pacing summary of a log; thread sampling profiler |
