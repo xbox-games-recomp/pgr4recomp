@@ -1,7 +1,7 @@
 # Launch pgr4recomp windowed (the SDK's `fullscreen` cvar defaults to true) with a log file.
-# Usage: & scripts\run.ps1 [tag] [extra cvars...]   -> log in work\<tag>.log
+# Usage: & scripts\dev\run.ps1 [tag] [extra cvars...]   -> log in work\<tag>.log
 param([string]$Tag = 'run', [Parameter(ValueFromRemainingArguments)] [string[]]$Extra)
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = Join-Path $root 'out\build\win-amd64-release\pgr4recomp.exe'
 $log = Join-Path $root "work\$Tag.log"
 Remove-Item $log -ErrorAction SilentlyContinue

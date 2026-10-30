@@ -1,8 +1,8 @@
 # Launch pgr4recomp with the live pad file and drive it into the first-run St Petersburg race.
 # Boot -> intro -> title -> profile dialog / menus (mashing START,A) -> event card -> race.
-# Usage: & scripts\goto_race.ps1 [tag] [extra cvars...]   (command file: work\pad_cmd.txt)
+# Usage: & scripts\dev\goto_race.ps1 [tag] [extra cvars...]   (command file: work\pad_cmd.txt)
 param([string]$Tag = 'race', [Parameter(ValueFromRemainingArguments)] [string[]]$Extra)
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $cmd = Join-Path $root 'work\pad_cmd.txt'
 $log = Join-Path $root "work\$Tag.log"
 Remove-Item $cmd -ErrorAction SilentlyContinue

@@ -3,7 +3,7 @@
 Captures the pgr4recomp window (PrintWindow, works while covered), finds the route line in the rotating HUD
 minimap (white core, red edges; the car arrow always points up) and writes steering/throttle to the live pad
 command file (work/pad_cmd.txt, see src/scripted_input.h). Commands hold for 250 ms, so the car coasts if this
-script stops. Window client size must be 960x540 (scripts/run.ps1).
+script stops. Window client size must be 960x540 (scripts/dev/run.ps1).
 
 Steering: follow the route line outward from the arrow tip (breadth-first over the line mask) and steer at the
 point ~30 px along it. Speed: read the HUD MPH digits (templates in scripts/speed_digits.json, built by

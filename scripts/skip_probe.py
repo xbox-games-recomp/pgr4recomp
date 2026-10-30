@@ -31,7 +31,7 @@ times = []
 for n in range(shots):
     times.append(time.strftime('%H:%M:%S') + f'.{int(time.time() * 1000) % 1000:03d}')
     subprocess.run([ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-                    os.path.join(ROOT, 'scripts', 'snap.ps1'), os.path.join(WORK, f'{tag}_k_{n}.png')],
+                    os.path.join(ROOT, 'scripts', 'dev', 'snap.ps1'), os.path.join(WORK, f'{tag}_k_{n}.png')],
                    capture_output=True)
     time.sleep(0.3)
 files = [os.path.join(WORK, f'{tag}_k_{n}.png') for n in range(shots)]

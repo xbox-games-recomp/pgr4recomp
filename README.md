@@ -105,7 +105,7 @@ default.xex ─► rexglue codegen ─► generated/default/*.cpp ─► Clang �
 - **`patches/`** add draw debugging, GPU frame stats, pooled texture heaps and two half-float fixes to the SDK.
   Regenerate one with `git -C ..\_ext\rexglue-sdk diff -- <files>`.
 
-`NOTES.md` is the engineering log (every bug, cause and fix). `scripts\run.ps1`, `snap.ps1`, `boot_steps.ps1`,
+`NOTES.md` is the engineering log (every bug, cause and fix). `scripts\dev\` (`run.ps1`, `snap.ps1`, `boot_steps.ps1`, ...),
 `autopilot.py` and `hitch_stats.py` drive and measure test runs.
 
 ## Open issues

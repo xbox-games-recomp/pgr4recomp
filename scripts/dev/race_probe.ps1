@@ -1,7 +1,7 @@
 # After goto_race.ps1: wait for the race to start, hold the throttle and snapshot a few frames.
-# Usage: & scripts\race_probe.ps1 <tag> [startDelaySeconds] [snapshots]   -> work\<tag>_<n>.png
+# Usage: & scripts\dev\race_probe.ps1 <tag> [startDelaySeconds] [snapshots]   -> work\<tag>_<n>.png
 param([string]$Tag = 'probe', [int]$StartDelay = 25, [int]$Shots = 4)
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $cmd = Join-Path $root 'work\pad_cmd.txt'
 Start-Sleep -Seconds $StartDelay
 Set-Content $cmd "0:RT=0.7:$(($Shots * 3 + 2) * 1000)"

@@ -1,8 +1,8 @@
 # Boot into the St Petersburg race, leave the car on the start line (static camera) and snapshot the sky
 # repeatedly, then count artifact frames with sky_probe.py.
-# Usage: & scripts\sky_bench.ps1 <tag> [shots] [extra cvars...]   -> work\<tag>_<n>.png
+# Usage: & scripts\dev\sky_bench.ps1 <tag> [shots] [extra cvars...]   -> work\<tag>_<n>.png
 param([string]$Tag = 'sky', [int]$Shots = 40, [Parameter(ValueFromRemainingArguments)] [string[]]$Extra)
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Extra = @($Extra | Where-Object { $_ })
 & (Join-Path $PSScriptRoot 'boot_steps.ps1') $Tag 'START,START,A,A,A,A,A,A,A,A,A' 5 @Extra | Out-Null
 Start-Sleep -Seconds 25   # race load + countdown
@@ -12,4 +12,4 @@ for ($n = 0; $n -lt $Shots; $n++) {
   Start-Sleep -Milliseconds 700
 }
 Stop-Process -Name pgr4recomp -Force -ErrorAction SilentlyContinue
-python (Join-Path $PSScriptRoot 'sky_probe.py') (Join-Path $root "work\${Tag}_s_*.png") | Select-Object -Last 1
+python (Join-Path $root 'scripts\sky_probe.py') (Join-Path $root "work\${Tag}_s_*.png") | Select-Object -Last 1

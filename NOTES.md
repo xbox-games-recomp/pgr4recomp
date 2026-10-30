@@ -67,9 +67,9 @@ game's Lua 5.1 uses setjmp or C++ throw before relying on Lua error paths.
 
 ## 6. First boots (2026-10-28)
 
-- Build: `scripts\build.bat` (~50 s full, generated code compiles fast with clang 23). Run: `& scripts\run.ps1 <tag>`
+- Build: `scripts\build.bat` (~50 s full, generated code compiles fast with clang 23). Run: `& scripts\dev\run.ps1 <tag>`
   -> windowed 960x540 (`--fullscreen=false`; SDK default is fullscreen), log in `work\<tag>.log`.
-  Snapshot without focusing the window: `& scripts\snap.ps1 out.png` (PrintWindow PW_RENDERFULLCONTENT; a plain
+  Snapshot without focusing the window: `& scripts\dev\snap.ps1 out.png` (PrintWindow PW_RENDERFULLCONTENT; a plain
   screen copy grabs whatever covers the window).
 - `--game_data_root` is required (no positional path). The SDK's `gpu_plugin` cvar defaults to "" = no GPU;
   `Pgr4recompApp::OnPreSetup` now defaults it to `xenos` (D3D12, loads `rexgpu-xenos.dll`).
@@ -86,7 +86,7 @@ game's Lua 5.1 uses setjmp or C++ throw before relying on Lua error paths.
 
 - `src/scripted_input.h`: synthetic pad driver added to the SDK's default input system when `PGR4_PAD` is set
   (synthetic devices route to guest user 0 and merge with a real pad). Syntax in the header, e.g.
-  `$env:PGR4_PAD='~4@15:START,~4@17:A'; & scripts\run.ps1 menu1`. Presses are logged (`PGR4_PAD: t=..`).
+  `$env:PGR4_PAD='~4@15:START,~4@17:A'; & scripts\dev\run.ps1 menu1`. Presses are logged (`PGR4_PAD: t=..`).
 - Run menu1 (START/A mashing): Dolby logo -> loading -> **first-run race** (Street Race, St Petersburg, Ford
   Sierra Cosworth RS500) with countdown, world, HUD and pause menu all rendering. A new profile starts in this
   race, not the front-end, so the menus come after it. No fatal errors in 2 min.
@@ -98,7 +98,7 @@ game's Lua 5.1 uses setjmp or C++ throw before relying on Lua error paths.
 
 - Pad additions (`src/scripted_input.h`): `PGR4_PAD_FILE` live command file (re-read on mtime change, times
   relative to the change), analog channels `RT=0.6`, `LX=-0.4` etc., expired one-shot entries pruned.
-- `scripts/goto_race.ps1 <tag>`: boot + START/A through the input-only black screens until the race car loads.
+- `scripts/dev/goto_race.ps1 <tag>`: boot + START/A through the input-only black screens until the race car loads.
   Boot path for a fresh profile: intro -> **black screens that still take input** (START, A, A; likely title /
   profile / storage prompts that don't render -- open rendering bug) -> event card "Catch Me If You Can"
   (choose difficulty) -> St Petersburg street race (4 laps, Ford Sierra Cosworth).
@@ -128,7 +128,7 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
   `src/xam_fixes.cpp` with a real empty enumerator (strong `__imp__` override in the exe, no SDK fork); 3/3 boots OK.
 - `src/import_trace.cpp` (`$env:PGR4_TRACE_IMPORTS=1`): logs selected XAM calls with args, result and guest return
   addresses (lr + back-chain), plus every 30th `VdSwap` with the frontbuffer fetch constant.
-- `scripts/boot_steps.ps1 <tag> 'START,A,WAIT,...' <delay> [cvars]`: one press per step, snapshot after each.
+- `scripts/dev/boot_steps.ps1 <tag> 'START,A,WAIT,...' <delay> [cvars]`: one press per step, snapshot after each.
 - **The boot "black screens" are not system UI.** No XamShow* call happens on them (the only one, a headless
   XamShowDeviceSelectorUI, comes later). Sequence with a save: intro -> (START) white fade -> title "PRESS START
   TO CONTINUE" (renders) -> (A) front end loads `frontend_mad.bpr` + Ferrari Enzo showroom car -> **black**, 30 s+,
@@ -175,12 +175,12 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
   processor thread was mostly idle-spinning. Culprit: the SDK cvar `clear_memory_page_state` (default true,
   ReXGlue addition, not upstream Xenia) drops every CPU-uploaded shared-memory page at each frame end, so all
   geometry/textures are re-uploaded each frame. Off -> locked ~60 fps, no visible difference (write watches
-  still catch CPU writes). Now defaulted off in `OnPreSetup`. Benchmarks (`scripts/bench.ps1`, 960x540, RTX
+  still catch CPU writes). Now defaulted off in `OnPreSetup`. Benchmarks (`scripts/dev/bench.ps1`, 960x540, RTX
   4080 SUPER): default 38/39, readback_memexport off 38, submit_on_primary_buffer_end off 38, vsync off 39,
   RTV 51/37, mrt clamp off 38, **clear_memory_page_state off 59-60**.
 - **Sky wedges** (grey in St Petersburg day, black/orange at night): intermittent huge triangles; in the
   St Petersburg start-line view always fanning from the top of the Alexander Column toward the top-right
-  screen edge. **Still open.** `scripts/sky_bench.ps1` (car parked on the start line, static camera, N
+  screen edge. **Still open.** `scripts/dev/sky_bench.ps1` (car parked on the start line, static camera, N
   snapshots; `sky_probe.py` counts frames whose sky deviates from the median) measures a ~3-6% frame rate:
   default 1/40, 3/60, 4/40; readback_memexport off 8/60; RTV 0/60; occlusion_query_enable=false 0/60 then
   6/120 (so not occlusion queries; the 0/60 runs were luck at this base rate, RTV is unproven too). Not
@@ -201,7 +201,7 @@ Xenia builds 2019-2023 under `G:\Emulators\Xbox 360 Emulator` (reference/ground 
 ## 12. Sky wedges: broken crowd skeletons, culled (2026-10-28/29)
 
 User recording: grey wedges flickering out of the Alexander Column top at the St Petersburg start line
-(orange at night in Shanghai). `scripts/sky_bench.ps1` reproduces it. Wedges come in bursts (about one
+(orange at night in Shanghai). `scripts/dev/sky_bench.ps1` reproduces it. Wedges come in bursts (about one
 frame every ~20 s at the start line), so verdicts need 180+ snapshot runs; several earlier 0/60 results
 were luck.
 Tooling: SDK draw-debug hook (`patches/rexglue-draw-debug.patch`), active only with

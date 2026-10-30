@@ -1,8 +1,8 @@
 # Race benchmark (needs a save that reaches the St Petersburg arcade race): boot, menu through to the race,
 # hold the throttle, snapshot, then report the race's logged fps and kill the game.
-# Usage: & scripts\bench.ps1 <tag> [extra cvars...]   -> work\<tag>.log, work\<tag>_r_<n>.png
+# Usage: & scripts\dev\bench.ps1 <tag> [extra cvars...]   -> work\<tag>.log, work\<tag>_r_<n>.png
 param([string]$Tag = 'bench', [Parameter(ValueFromRemainingArguments)] [string[]]$Extra)
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Extra = @($Extra | Where-Object { $_ })
 & (Join-Path $PSScriptRoot 'boot_steps.ps1') $Tag 'START,START,A,A,A,A,A,A,A,A,A' 5 @Extra | Out-Null
 $raceStart = Get-Date

@@ -1,6 +1,6 @@
 # Capture the pgr4recomp window's own contents via PrintWindow(PW_RENDERFULLCONTENT), so it works while the
-# window is covered by other windows and never changes focus. Usage: & scripts\snap.ps1 [out.png]
-param([string]$Out = (Join-Path (Split-Path $PSScriptRoot -Parent) 'work\snap.png'))
+# window is covered by other windows and never changes focus. Usage: & scripts\dev\snap.ps1 [out.png]
+param([string]$Out = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'work\snap.png'))
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;
