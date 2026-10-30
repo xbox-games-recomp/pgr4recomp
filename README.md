@@ -87,7 +87,7 @@ The launcher does everything in [Getting the source](#getting-the-source) (the S
    **Run setup**. When it is done, press **Play**.
 
 The step-by-step guide, shared by every game that uses the launcher, is
-**[First-time setup](https://github.com/taxidriverhk/recomp-launcher#readme)** (also in
+**[First-time setup](https://github.com/taxidriverhk/xbox-recomp-launcher#readme)** (also in
 `launcher\README.md`). It covers choosing the game copy, installing the build tools, what each step does,
 troubleshooting, updating and running from a git clone.
 
@@ -194,7 +194,7 @@ Plug in the gamepad first, then double-click `pgr4_launcher.exe` in the reposito
 there and next to the game). It is a settings window — window size, fullscreen, 60 fps, resolution scale,
 AA, anisotropic filtering, log level — that passes your choices as cvars (overriding `pgr4recomp.toml`) and
 saves them to `launcher.user.ini`. The options are in `launcher.ini`; the launcher itself is the `launcher/`
-submodule ([recomp-launcher](https://github.com/taxidriverhk/recomp-launcher)). `pgr4_launcher.exe --play`
+submodule ([xbox-recomp-launcher](https://github.com/taxidriverhk/xbox-recomp-launcher)). `pgr4_launcher.exe --play`
 starts the game straight away with the saved settings.
 
 By default it starts `out\build\win-amd64-release\pgr4recomp.exe` in a 1280×720 window with `assets` as the

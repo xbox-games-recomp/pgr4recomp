@@ -33,7 +33,7 @@ add_custom_command(TARGET pgr4recomp POST_BUILD
             -DDST=$<TARGET_FILE_DIR:pgr4recomp>/pgr4recomp.toml
             -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/copy_if_missing.cmake)
 
-# launcher/ submodule (recomp-launcher): a settings window that starts the game with the options in
+# launcher/ submodule (xbox-recomp-launcher): a settings window that starts the game with the options in
 # launcher.ini (passed as cvars, overriding pgr4recomp.toml). Built as pgr4_launcher.exe next to the game
 # and in the repository root.
 add_subdirectory(launcher)
