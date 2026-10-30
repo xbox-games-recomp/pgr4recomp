@@ -8,7 +8,7 @@ a replacement Xbox 360 runtime; the Xenos command stream is rendered with Direct
 interpreter or JIT.
 
 Built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0 (BSD-3-Clause, Xenia-derived) with
-five local patches in `patches/`.
+six local patches in `patches/`.
 
 > **No game content is in this repository.** You need your own copy of the game. Everything derived from it
 > (generated C++, builds, logs, snapshots) is git-ignored.
@@ -102,7 +102,8 @@ default.xex ─► rexglue codegen ─► generated/default/*.cpp ─► Clang �
   recompiled code).
 - **`src/`** sets the PGR4 defaults, adds the 60 fps hook and adaptive vsync, fixes
   `XamCreateEnumeratorHandle` (crash at boot with a save), and collects frame stats.
-- **`patches/`** add draw debugging, GPU frame stats, pooled texture heaps and two half-float fixes to the SDK.
+- **`patches/`** add draw debugging, GPU frame stats, pooled texture heaps, two half-float fixes and a
+  `--user_name` cvar for the profile's gamertag (the launcher's Profile name) to the SDK.
   Regenerate one with `git -C ..\_ext\rexglue-sdk diff -- <files>`.
 
 `NOTES.md` is the engineering log (every bug, cause and fix). `scripts\dev\` (`run.ps1`, `snap.ps1`, `boot_steps.ps1`, ...),

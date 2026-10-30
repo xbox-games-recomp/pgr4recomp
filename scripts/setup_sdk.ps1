@@ -12,7 +12,7 @@ $install = Join-Path $sdk "out\install\win-amd64\bin"
 $stamp = Join-Path $sdk "out\pgr4recomp-patches.txt"
 # README order; each patch is a git diff of the SDK tree on top of the previous ones.
 $patches = "rexglue-draw-debug", "rexglue-gpu-frame-stats", "rexglue-texture-heap-pool",
-           "rexglue-vpkd3d-float16-range", "rexglue-x360-half-vertex-kill" |
+           "rexglue-vpkd3d-float16-range", "rexglue-x360-half-vertex-kill", "rexglue-user-name" |
            ForEach-Object { Join-Path $repo "patches\$_.patch" }
 
 # 1. Source
@@ -42,35 +42,44 @@ foreach ($d in $dirs) {
 }
 "Symlinks replaced: $fixed"
 
-# 3. Patches. The stamp records the patch set this tree was built with.
-$want = ($patches | ForEach-Object { (Get-FileHash $_ -Algorithm SHA1).Hash }) -join "`n"
-$have = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { $null }
+# 3. Patches. The stamp records the patch set this tree was built with, one hash per line in order.
+$want = @($patches | ForEach-Object { (Get-FileHash $_ -Algorithm SHA1).Hash })
+$have = if (Test-Path $stamp) { @(Get-Content $stamp | Where-Object { $_.Trim() }) } else { @() }
 $rebuild = -not (Test-Path (Join-Path $install "rexglue.exe"))
-if ($have -eq $want) {
+if (($have -join "`n") -eq ($want -join "`n")) {
     "Patches already applied"
-} elseif (-not $have -and (git -C $sdk status --porcelain --untracked-files=no --ignore-submodules=all)) {
+} elseif (-not $have.Count -and (git -C $sdk status --porcelain --untracked-files=no --ignore-submodules=all)) {
     # A tree patched by hand before this script existed.
     "The SDK tree already has local changes; assuming the patches are in (delete $sdk to start clean)"
     New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
-    Set-Content $stamp $want
+    Set-Content $stamp ($want -join "`n")
 } else {
-    if ($have) { throw "The patches changed since the SDK was built. Revert the SDK tree (git -C `"$sdk`" checkout .) and run again." }
-    foreach ($p in $patches) {
+    # New patches go at the end of the list, so a tree built with the earlier ones takes just the new ones.
+    $prefix = $have.Count -le $want.Count
+    for ($i = 0; $prefix -and $i -lt $have.Count; $i++) { if ($have[$i] -ne $want[$i]) { $prefix = $false } }
+    if (-not $prefix) { throw "The patches changed since the SDK was built. Revert the SDK tree (git -C `"$sdk`" checkout .) and run again." }
+    foreach ($p in $patches[$have.Count..($patches.Count - 1)]) {
+        git -C $sdk apply --reverse --check $p 2>$null
+        if ($LASTEXITCODE -eq 0) { "$(Split-Path $p -Leaf) is already in the tree"; continue }
         git -C $sdk apply $p
         if ($LASTEXITCODE -ne 0) {
             throw "$(Split-Path $p -Leaf) does not apply to $sdk. Is it a clean v0.10.0 tree? (git -C `"$sdk`" checkout .)"
         }
         "Applied $(Split-Path $p -Leaf)"
     }
-    New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
-    Set-Content $stamp $want
+    # The stamp is written once the build succeeds: a failed build is retried with the next run.
     $rebuild = $true
 }
 
 # 4. Build + install
 if ($rebuild) {
-    & cmd /c "`"$PSScriptRoot\build_sdk.bat`" `"$sdk`"" 2>&1 | ForEach-Object { "$_" }
+    # By full path: a shell may hand down a PATH without System32, and a cmd that is not found would leave
+    # $LASTEXITCODE as it was, passing for success.
+    $global:LASTEXITCODE = 1
+    & (Join-Path $env:SystemRoot "System32\cmd.exe") /c "`"$PSScriptRoot\build_sdk.bat`" `"$sdk`"" 2>&1 | ForEach-Object { "$_" }
     if ($LASTEXITCODE -ne 0) { throw "SDK build failed" }
+    New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
+    Set-Content $stamp ($want -join "`n")
     # The game build copies the SDK DLLs only when it is configured; refresh an existing build directory.
     $game = Join-Path $repo "out\build\win-amd64-release"
     if (Test-Path $game) {
