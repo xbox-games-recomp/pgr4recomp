@@ -78,30 +78,27 @@ building.
 ## First-time setup with the launcher
 
 The launcher can do everything in [Getting the source](#getting-the-source) (the SDK part),
-[Getting the game files](#getting-the-game-files) and [Building](#building) for you. Install the
-[requirements](#requirements) and clone this repository, then:
+[Getting the game files](#getting-the-game-files) and [Building](#building) for you.
 
-1. Get the launcher: download `recomp_launcher.exe` from the
-   [recomp-launcher releases](https://github.com/taxidriverhk/recomp-launcher/releases) into the repository
-   root, or build it from the submodule in a few seconds:
+1. Download `pgr4recomp-<version>-windows.zip` from this repository's releases page and unzip it, preferably
+   to a short path such as `C:\Games`. The SDK is built next to the unzipped folder, in
+   `..\_ext\rexglue-sdk`. The zip holds the source and the launcher, and no game content.
 
-   ```bat
-   git submodule update --init launcher
-   cmake -S launcher -B launcheruild
-   cmake --build launcheruild --config Release
-   ```
-
-   (The exe is `launcheruild\Releaseecomp_launcher.exe`.)
-2. Run it. It opens on the **Setup** page.
+   (From a clone instead: `git submodule update --init launcher`, then build the launcher in a few seconds
+   with `cmake -S launcher -B launcher\build` and `cmake --build launcher\build --config Release`, and run
+   `launcher\build\Release\recomp_launcher.exe`.)
+2. Run `pgr4_launcher.exe`. It opens on the **Setup** page.
 3. Choose your disc image (*Disc image…*, the full XGD2 dump) or the folder of an already extracted disc
    (*Folder…*, linked as `assets\` with a directory junction), and press **Run setup**.
 
-It checks for Git, Visual Studio 2022 Community, LLVM and CMake in the folders the build scripts expect. It
+It checks for Git, Visual Studio 2022 Community, LLVM and CMake in the folders the build scripts expect. If any
+are missing, it offers to install them with winget, which can take a while (Visual Studio especially). It
 puts the disc in `assets\` and checks `default.xex` against the SHA-1 below. It then runs
-`scripts\setup_sdk.ps1`, which clones the SDK into `..\_extexglue-sdk`, replaces the symlink files,
-applies the patches and builds the SDK. Codegen and `scriptsuild.bat` come last. Its output shows in the
-window and goes to `setup.log`. When it finishes, press **Play**. The build has also put `pgr4_launcher.exe`
-in the repository root; use that one from now on.
+`scripts\setup_sdk.ps1`, which clones the SDK into `..\_ext\rexglue-sdk`, replaces the symlink files,
+applies the patches and builds the SDK. Codegen and `scripts\build.bat` come last. A progress bar and the
+output show in the window, and the output also goes to `setup.log`. When it finishes, press **Play**.
+
+A new release is built by pushing a `v*` tag (`.github/workflows/release.yml`).
 
 ## Getting the game files
 
