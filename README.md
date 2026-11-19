@@ -65,7 +65,8 @@ scripts\build.bat
 
 ## Running
 
-`pgr4_launcher.exe` sets window size, fullscreen, 60 fps, resolution scale, AA, anisotropic filtering and log
+`pgr4_launcher.exe` sets window size, fullscreen, resolution scale, AA, scaling, anisotropic filtering, vsync,
+title-bar stats, keyboard, rumble (the same pages as every port), 60 fps / adaptive vsync (Game page) and log
 level, passes them as cvars and logs to `work\play.log`; `--play` skips the window. Other cvars go in *Extra
 arguments*. Starting the exe yourself, pass `--fullscreen=false` and never give a cvar twice (the exe exits
 silently).
@@ -87,7 +88,9 @@ Settings in `pgr4recomp.toml` next to the exe (copied from `config/` once; comma
 The port also defaults `render_target_path_d3d12=rov`, `clear_memory_page_state=false` and
 `x360_half_vertex_kill=true`.
 
-**Controls:** the first XInput pad maps 1:1 to the Xbox 360 pad. `PGR4_PAD` / `PGR4_PAD_FILE` add a scripted
+**Controls:** the first XInput pad maps 1:1 to the Xbox 360 pad. Keyboard (on by default): arrows = D-pad,
+Enter = Start, Backspace = Back, Z/X/C/V = A/B/X/Y, Q/E = LB/RB, 1/3 = triggers, WASD = left stick,
+IJKL = right stick, Shift/Ctrl = stick clicks. `PGR4_PAD` / `PGR4_PAD_FILE` add a scripted
 pad for test runs (syntax in `src/scripted_input.h`).
 
 ## How it works
@@ -103,7 +106,8 @@ default.xex ─► rexglue codegen ─► generated/default/*.cpp ─► Clang �
 - **`src/`** sets the PGR4 defaults, adds the 60 fps hook and adaptive vsync, fixes
   `XamCreateEnumeratorHandle` (crash at boot with a save), and collects frame stats.
 - **`patches/`** add draw debugging, GPU frame stats, pooled texture heaps, two half-float fixes and a
-  `--user_name` cvar for the profile's gamertag (the launcher's Profile name) to the SDK.
+  `--user_name` cvar for the profile's gamertag (the launcher's Profile name) to the SDK;
+  `rexglue-recomp-controls` gives the keyboard the ports' shared layout and adds `--vibration` (Rumble).
   Regenerate one with `git -C ..\_ext\rexglue-sdk diff -- <files>`.
 
 `NOTES.md` is the engineering log (every bug, cause and fix). `scripts\dev\` (`run.ps1`, `snap.ps1`, `boot_steps.ps1`, ...),

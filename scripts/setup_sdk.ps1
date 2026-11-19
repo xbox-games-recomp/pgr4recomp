@@ -12,7 +12,7 @@ $install = Join-Path $sdk "out\install\win-amd64\bin"
 $stamp = Join-Path $sdk "out\pgr4recomp-patches.txt"
 # README order; each patch is a git diff of the SDK tree on top of the previous ones.
 $patches = "rexglue-draw-debug", "rexglue-gpu-frame-stats", "rexglue-texture-heap-pool",
-           "rexglue-vpkd3d-float16-range", "rexglue-x360-half-vertex-kill", "rexglue-user-name" |
+           "rexglue-vpkd3d-float16-range", "rexglue-x360-half-vertex-kill", "rexglue-user-name", "rexglue-recomp-controls" |
            ForEach-Object { Join-Path $repo "patches\$_.patch" }
 
 # 1. Source
