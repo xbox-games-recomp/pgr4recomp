@@ -1,5 +1,7 @@
 # Project Gotham Racing 4 — Static Recompilation
 
+![The launcher](docs/launcher.png)
+
 ![Racing in Macau](docs/macau_race.png)
 
 A native Windows (x64) port of the Xbox 360 *Project Gotham Racing 4* (Bizarre Creations / Microsoft, 2007).
